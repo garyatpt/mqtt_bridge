@@ -27,8 +27,9 @@
 
 #define GETINT_DLM ','
 
-int getInt(char **, int *);
-int getString(char **, char *, int, char);
-int run_script(char *, char *, char *, int, int);
+int utils_htoi(char);
+int utils_getInt(char **, int *);
+int utils_getString(char **, char *, int, char);
+int utils_run_script(char *, char *, char *, int, int);
 
 #endif

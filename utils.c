@@ -30,7 +30,18 @@
 #include <stdbool.h>
 #include <unistd.h>
 
-int getInt(char **buf, int *number)
+int utils_htoi(char c)
+{
+  if (c <= '9')
+    return c-'0';
+  if (c <= 'F')
+    return c-'A'+10;
+  if (c <= 'f')
+    return c - 'a' +10;
+  return 0;
+}
+
+int utils_getInt(char **buf, int *number)
 {
 	bool isInt = false;
 	char ch;
@@ -67,7 +78,7 @@ int getInt(char **buf, int *number)
 		return 0;
 }
 
-int getString(char **buf, char *str, int size, char lim)
+int utils_getString(char **buf, char *str, int size, char lim)
 {
 	char ch;
 	char *pt;
@@ -109,7 +120,7 @@ int getString(char **buf, char *str, int size, char lim)
 	return cnt;
 }
 
-int run_script(char *dir, char *scriptName, char *output, int output_max_size, int debug)
+int utils_run_script(char *dir, char *scriptName, char *output, int output_max_size, int debug)
 {
 	FILE *pf;
 	char *command;

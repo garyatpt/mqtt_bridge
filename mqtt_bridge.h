@@ -25,34 +25,8 @@
 #ifndef MQTT_BRIDGE_H
 #define MQTT_BRIDGE_H
 
-#define ALIVE_CNT 3
-#define TOPIC_MIN_SIZE 3
-#define TOPIC_MAX_SIZE 30
-
 #define MQTT_RETAIN 0
-
-#define PROTO_ERROR 0
-#define PROTO_ACK 1
-#define PROTO_NACK 2
-#define PROTO_ST_ALIVE 3				// "status/id"
-#define PROTO_ST_TIMEOUT 4				// "status/id"
-#define PROTO_ST_MODULES_UP 5			// "status/id"
-#define PROTO_MODULE 6
-#define PROTO_GET_MODULE 7
-#define PROTO_GET_MODULES 8
-#define PROTO_MD_TOPIC 9
-#define PROTO_MD_GET_TOPIC 10
-#define PROTO_MD_SET_TOPIC 11
-#define PROTO_MD_RAW 12					// Module topic
-#define PROTO_MD_TO_RAW 13
-#define PROTO_MD_ENABLE 14
-#define PROTO_MD_GET_ENABLE 15
-#define PROTO_MD_SET_ENABLE 16
-#define PROTO_MD_SET_ID 17
-#define PROTO_DEVICE 18
-#define PROTO_GET_DEVICES 19
-#define PROTO_SAVE_DEVICE 20
-#define PROTO_REMOVE_DEVICE 21
+#define MQTT_MAX_PAYLOAD_LEN 128
 
 struct bridge_serial{
 	char *port;
@@ -68,11 +42,14 @@ struct bridge_config{
 	int mqtt_port;
 	int mqtt_qos;
 	struct bridge_serial serial;
-	char *devices_folder;
 	char *scripts_folder;
 	char *interface;
-	char *remap_usr1;
-	char *remap_usr2;
+	char *remap_usr1_dev;
+	char *remap_usr2_dev;
+	char *remap_usr1_md;
+	char *remap_usr2_md;
+	int remap_usr1_md_code;
+	int remap_usr2_md_code;
 };
 
 int config_parse(const char *conffile, struct bridge_config *config);

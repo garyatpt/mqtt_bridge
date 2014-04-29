@@ -37,7 +37,11 @@
 #include "mqtt_bridge.h"
 #include "utils.h"
 #include "arduino-serial-lib.h"
+#include "bridge.h"
+#include "protocol.h"
+#include "error.h"
 #include "device.h"
+#include "modules.h"
 #include "serial.h"
 #include "netdev.c"
 
@@ -46,7 +50,7 @@
 #define MAX_OUTPUT 256
 #define GBUF_SIZE 100
 
-const char version[] = "0.0.1";
+const char version[] = "0.0.2";
 
 struct bridge bridge;
 
@@ -57,40 +61,23 @@ static int user_signal = false;
 static bool bandwidth = false;
 struct bridge_config config;
 static double downspeed, upspeed;
+static bool every1s = false;
 static bool every30s = false;
 static bool quiet = false;
 static bool connected = true;
 
-char gbuf[GBUF_SIZE + 1];
+char gbuf[GBUF_SIZE];
 
 void handle_signal(int signum)
 {
-	double drift;
-	static bool sigUSR1_flag = false;
-	static struct timeval sigUSR1;
-	static struct timeval sigUSR2;
-
 	if (config.debug > 1) printf("Signal: %d\n", signum);
 
 	if (signum == SIGUSR1) {
-		sigUSR1_flag = true;
-		gettimeofday(&sigUSR1, NULL);
+		user_signal = MODULES_BRIDGE_SIGUSR1;
 		return;
 	}
 	else if(signum == SIGUSR2) {
-		if (!sigUSR1_flag) {
-			if (config.debug > 1) printf("SIGUSR2 before SIGUSR1.\n");
-			return;
-		}
-		sigUSR1_flag = false;
-		gettimeofday(&sigUSR2, NULL);
-		drift = ((sigUSR2.tv_sec - sigUSR1.tv_sec) + ((sigUSR2.tv_usec - sigUSR1.tv_usec)/MICRO_PER_SECOND));
-
-		if (drift > 2.0)
-			user_signal = MODULE_SIGUSR2;
-		else
-			user_signal = MODULE_SIGUSR1;
-		if (config.debug > 2) printf("user_signal drift: %f\n", drift);
+		user_signal = MODULES_BRIDGE_SIGUSR2;
 		return;
 	}
     run = 0;
@@ -98,12 +85,20 @@ void handle_signal(int signum)
 
 void each_sec(int x)
 {
-	static int cnt = 0;
 	static struct timeval t1, t2;
 	static int seconds = 0;
 	double drift;
 	static unsigned long long int oldrec, oldsent, newrec, newsent;
-	
+	static int cnt = 0;
+
+	every1s = true;
+	if (++seconds == 60)
+		seconds = 0;
+	if (seconds % 30 == 0)
+		every30s = true;
+
+	if (config.debug > 3) printf("seconds: %d\n", seconds);
+
 	if (bandwidth) {
 		if (cnt == 0) {
 			gettimeofday( &t1, NULL );
@@ -111,38 +106,29 @@ void each_sec(int x)
 				fprintf(stderr, "Error when parsing /proc/net/dev file.\n");
 				exit(1);
 			}
-			cnt++;
-			alarm(1);
-			return;
-		}
+		} else {
+			oldrec = newrec;
+			oldsent = newsent;
+			if (parse_netdev(&newrec, &newsent, config.interface)) {
+				fprintf(stderr, "Error when parsing /proc/net/dev file.\n");
+				exit(1);
+			}
 
-		oldrec = newrec;
-		oldsent = newsent;
-		if (parse_netdev(&newrec, &newsent, config.interface)) {
-			fprintf(stderr, "Error when parsing /proc/net/dev file.\n");
-			exit(1);
-		}
+			if (cnt % 2 == 0) {		// Even
+				gettimeofday( &t1, NULL );
+				drift=(t1.tv_sec - t2.tv_sec) + ((t1.tv_usec - t2.tv_usec)/MICRO_PER_SECOND);
+			} else {				// Odd
+				gettimeofday( &t2, NULL );
+				drift=(t2.tv_sec - t1.tv_sec) + ((t2.tv_usec - t1.tv_usec)/MICRO_PER_SECOND);
+			}
+			if (config.debug > 3) printf("%.6lf seconds elapsed\n", drift);
 
-		if (cnt % 2 == 0) {		// Even
-			gettimeofday( &t1, NULL );
-			drift=(t1.tv_sec - t2.tv_sec) + ((t1.tv_usec - t2.tv_usec)/MICRO_PER_SECOND);
-		} else {				// Odd
-			gettimeofday( &t2, NULL );
-			drift=(t2.tv_sec - t1.tv_sec) + ((t2.tv_usec - t1.tv_usec)/MICRO_PER_SECOND);
+			downspeed = (newrec - oldrec) / drift / 128.0;		// Kbits = / 128; KBytes = / 1024
+			upspeed = (newsent - oldsent) / drift / 128.0;		// Kbits = / 128; KBytes = / 1024
 		}
-		if (config.debug > 3) printf("%.6lf seconds elapsed\n", drift);
-
-		downspeed = (newrec - oldrec) / drift / 128.0;		// Kbits = / 128; KBytes = / 1024
-		upspeed = (newsent - oldsent) / drift / 128.0;		// Kbits = / 128; KBytes = / 1024
-		
 		cnt++;
 	}
 
-	if (++seconds == 60)
-		seconds = 0;
-	if (seconds % 30 == 0) every30s = true;
-
-	if (config.debug > 3) printf("seconds: %d\n", seconds);
 	alarm(1);
 }
 
@@ -158,44 +144,42 @@ int mqtt_publish(struct mosquitto *mosq, char *topic, char *payload)
 	return 1;
 }
 
-int mqtt_publish_bandwidth(struct mosquitto *mosq, char *topic) {
-	int payload_len;
-	char *payload;
+void send_alive(struct mosquitto *mosq) {
+	static unsigned int beacon_num = 1;
 
-	if (!topic)
-		return 1;
-
-	if (config.debug > 1) printf("down: %f - up: %f\n", downspeed, upspeed);
-
-	payload_len = snprintf(NULL, 0, "%.0f,%.0f", upspeed, downspeed);
-	if ((payload = (char *)malloc((payload_len + 1)* (sizeof(char)))) == NULL) {
-		fprintf(stderr, "Error: No memory left.\n");
-		return -1;
-	}
-	snprintf(payload, payload_len + 1, "%.0f,%.0f", upspeed, downspeed);
-	mqtt_publish(mosq, topic, payload);
-	free(payload);
-
-	return 0;
+	snprintf(gbuf, GBUF_SIZE, "%d,%d,%d,%d", PROTOCOL_ALIVE, bridge.bridge_dev->modules, beacon_num, 30);
+	if (mqtt_publish(mosq, bridge.bridge_dev->status_topic, gbuf))
+		beacon_num++;
 }
 
 void on_mqtt_connect(struct mosquitto *mosq, void *obj, int result)
 {
+	struct device *dev;
 	int rc;
 
 	if (!result) {
 		connected = true;
-		if(config.debug != 0) printf("MQTT Connected.\n");
+		if(config.debug) printf("MQTT Connected.\n");
 
-		rc = mosquitto_subscribe(mosq, NULL, bridge.config_topic, config.mqtt_qos);
+		rc = mosquitto_subscribe(mosq, NULL, bridge.bridge_dev->config_topic, config.mqtt_qos);
 		if (rc) {
 			fprintf(stderr, "MQTT - Subscribe ERROR: %s\n", mosquitto_strerror(rc));
 			run = 0;
 			return;
 		}
-		snprintf(gbuf, GBUF_SIZE, "%d,%d", PROTO_ST_ALIVE, bridge.modules_len);
-		mqtt_publish(mosq, bridge.status_topic, gbuf);
-		return;
+		if (config.debug > 1) printf("Subscribe topic: %s\n", bridge.bridge_dev->config_topic);
+
+		for (dev = bridge.dev_list; dev != NULL; dev = dev->next) {
+			rc = mosquitto_subscribe(mosq, NULL, dev->config_topic, config.mqtt_qos);
+			if (rc) {
+				fprintf(stderr, "MQTT - Subscribe ERROR: %s\n", mosquitto_strerror(rc));
+				run = 0;
+				return;
+			}
+			if (config.debug > 1) printf("Subscribe topic: %s\n", bridge.bridge_dev->config_topic);
+		}
+
+		send_alive(mosq);
 	} else {
 		fprintf(stderr, "MQTT - Failed to connect: %s\n", mosquitto_connack_string(result));
     }
@@ -204,170 +188,200 @@ void on_mqtt_connect(struct mosquitto *mosq, void *obj, int result)
 void on_mqtt_disconnect(struct mosquitto *mosq, void *obj, int rc)
 {
 	connected = false;
-	bridge.controller = false;
 	if (config.debug != 0) printf("MQTT Disconnected: %s\n", mosquitto_strerror(rc));
 }
 
-void bridge_message(struct mosquitto *mosq, int sd, struct device *dev, char *msg)
+void mqtt_to_device(struct mosquitto *mosq, int sd, struct device *to_dev, char *from_dev_id, char *msg)
 {
-	char md_id[DEVICE_MD_ID_SIZE + 1];
+	int proto_code, num, rc;
+	char md_id[MODULES_ID_SIZE + 1];
 	struct module *md;
-	struct device *target_dev;
-	int code, i;
+	const int from_dev_topic_size = DEVICE_TOPIC_CONFIG_LEN + DEVICE_ID_SIZE + 1;
+	char from_dev_topic[from_dev_topic_size];
+	int i;
 
-	if (config.debug > 2) printf("Bridge - message: %s\n", msg);
+	snprintf(from_dev_topic, from_dev_topic_size, "%s%s", DEVICE_TOPIC_CONFIG, from_dev_id);
 
-	if (!getInt(&msg, &code)) {
-		if (config.debug > 1) printf("MQTT - Invalid data.\n");
+	// Get protocol code from msg
+	if (!utils_getInt(&msg, &proto_code)) {
+		snprintf(gbuf, GBUF_SIZE, "%s,%d,%d", to_dev->id, PROTOCOL_ERROR, ERROR_MIS_PROTOCOL);
+		mqtt_publish(mosq, from_dev_topic, gbuf);
+		if (config.debug > 1) printf("MQTT - Device: %s - Error: %d\n", from_dev_id, ERROR_MIS_PROTOCOL);
 		return;
 	}
 
-	switch (code) {
-		case PROTO_ERROR:
-		case PROTO_ACK:
-		case PROTO_NACK:
-		case PROTO_ST_TIMEOUT:
-		case PROTO_DEVICE:
-			return;
-		case PROTO_ST_ALIVE:
-			if (!getInt(&msg, &code))
+	switch (proto_code) {
+		case PROTOCOL_ERROR:
+		case PROTOCOL_MODULES:
+		case PROTOCOL_MD_INFO:
+		case PROTOCOL_MD_ENABLE:
+		case PROTOCOL_MD_DISABLE:
+		case PROTOCOL_MD_TOPIC:
+		case PROTOCOL_MD_OPTIONS:
+			// Loop prevention
+			if (!strncmp(to_dev->config_topic, from_dev_topic, from_dev_topic_size)) {
+				fprintf(stderr, "MQTT - Loop prevention\n");
 				return;
-			if (dev->modules == code)
-				return;
-			dev->modules = code;
-			// no return here is purposeful
-		case PROTO_ST_MODULES_UP:	// Modules Update
-			if (dev->type == DEVICE_TYPE_NODE) {
-				// Message from a serial device
-				if (dev->md_deps->type == MODULE_SERIAL && bridge.serial_ready) {
-					snprintf(gbuf, GBUF_SIZE, "%s%s,%d", SERIAL_INIT_MSG, dev->id, PROTO_GET_MODULES);
-					serialport_printlf(sd, gbuf);
-				}
-				// Message from a MQTT device
-				else if (dev->md_deps->type == MODULE_MQTT) {
-					snprintf(gbuf, GBUF_SIZE, "%s,%d", bridge.id, PROTO_GET_MODULES);
-					mqtt_publish(mosq, dev->topic, gbuf);
-					return;
-				}
 			}
+			break;
+		case PROTOCOL_ALIVE:
+		case PROTOCOL_TIMEOUT:
+		case PROTOCOL_MD_RAW:
 			return;
-		case PROTO_GET_MODULES:
-			// Message from a MQTT device
-			if (dev->md_deps->type == MODULE_MQTT) {
-				for (md = bridge.module; md != NULL; md = md->next) {
-					snprintf(gbuf, GBUF_SIZE, "%s,%d,%s,%s,%d", bridge.id, PROTO_MODULE, md->id, md->device, md->enabled);
-					mqtt_publish(mosq, dev->topic, gbuf);
-				}
-			}
-			return;
-		case PROTO_GET_DEVICES:
-			// Message from a MQTT device
-			if (dev->md_deps->type == MODULE_MQTT) {
-				for (i = 0; i < bridge.devices_len; i++) {
-					target_dev = &bridge.devices[i];
-					snprintf(gbuf, GBUF_SIZE, "%s,%d,%s,%d,%d"
-						, bridge.id, PROTO_DEVICE, target_dev->id, target_dev->modules, target_dev->alive);
-					mqtt_publish(mosq, dev->topic, gbuf);
-				}
-			}
-			return;
-		case PROTO_SAVE_DEVICE:
-			target_dev = device_get(&bridge, msg);
-			if (!target_dev)
-				return;
-			if (config.debug > 1) {
-				printf("Saving device:\n");
-				device_print_device(target_dev);
-			}
-			device_save(&bridge, config.devices_folder, target_dev);
+		default:
+			snprintf(gbuf, GBUF_SIZE, "%s,%d,%d", to_dev->id, PROTOCOL_ERROR, ERROR_INV_PROTOCOL);
+			mqtt_publish(mosq, from_dev_topic, gbuf);
 			return;
 	}
 
-	if (!getString(&msg, md_id, DEVICE_MD_ID_SIZE, ',')) {
-		if (config.debug > 1) printf("Missing module id - code: %d\n", code);
+	if (proto_code == PROTOCOL_ERROR) {
+		if (config.debug > 1) printf("MQTT - Device: %s - Error received: %s\n", from_dev_id, msg);
 		return;
 	}
-	if (!device_isValid_md_id(md_id)) {
-		if (config.debug > 1) printf("Invalid module id - code: %d\n", code);
-		return;
-	}
+	if (proto_code == PROTOCOL_MODULES) {
+		if (to_dev->modules == 0) {
+			return;
+		}
 
-	md = device_get_module(&bridge, md_id);
-	if (code == PROTO_MODULE) {
-		if (!md) {
-			if (device_add_module(&bridge, md_id, dev->id) == -1) {
-				run = 0;
-				return;
+		i = 0;
+		for (md = to_dev->md_list; md != NULL; md = md->next) {
+			if (i == 0) {
+				i = snprintf(gbuf, GBUF_SIZE, "%s,%d", to_dev->id, PROTOCOL_MODULES);
 			}
-			if (config.debug > 1) {
-				md = device_get_module(&bridge, md_id);
-				printf("New Module:\n");
-				device_print_module(md);
+			if (i > MQTT_MAX_PAYLOAD_LEN - 10) {
+				mqtt_publish(mosq, from_dev_topic, gbuf);
+				i = 0;
 			}
+			strcat(gbuf, ",");
+			strcat(gbuf, md->id);
+			i += MODULES_ID_SIZE + 1;
+		}
+		if (i > 0) {
+			mqtt_publish(mosq, from_dev_topic, gbuf);
 		}
 		return;
 	}
 
-	if (!md)
+	// Get module id from msg
+	if (!utils_getString(&msg, md_id, MODULES_ID_SIZE, ',')) {
+		snprintf(gbuf, GBUF_SIZE, "%s,%d,%d", to_dev->id, PROTOCOL_ERROR, ERROR_MIS_MODULE_ID);
+		mqtt_publish(mosq, from_dev_topic, gbuf);
+		if (config.debug > 1) printf("MQTT - Device: %s - Error: %d\n", from_dev_id, ERROR_MIS_MODULE_ID);
 		return;
-	target_dev = device_get(&bridge, md->device);
-	if (!target_dev) {
-		fprintf(stderr, "Error: Orphan module.\n");
-		device_remove_module(&bridge, md_id);
+	}
+	if (!bridge_isValid_module_id(md_id)) {
+		snprintf(gbuf, GBUF_SIZE, "%s,%d,%d", to_dev->id, PROTOCOL_ERROR, ERROR_MD_INV_ID);
+		mqtt_publish(mosq, from_dev_topic, gbuf);
+		if (config.debug > 1) printf("MQTT - Device: %s - Error: %d\n", from_dev_id, ERROR_MD_INV_ID);
+		return;
+	}
+	md = bridge_get_module(to_dev, md_id);
+	if (!md) {
+		snprintf(gbuf, GBUF_SIZE, "%s,%d,%d,%s", to_dev->id, PROTOCOL_ERROR, ERROR_MD_NOT_FOUND, md_id);
+		mqtt_publish(mosq, from_dev_topic, gbuf);
+		if (config.debug > 1) printf("MQTT - Device: %s - Error: %d\n", from_dev_id, ERROR_MD_NOT_FOUND);
 		return;
 	}
 
-	switch (code) {
-		case PROTO_GET_MODULE:
-			// Message from a MQTT device
-			if (dev->md_deps->type == MODULE_MQTT) {
-				snprintf(gbuf, GBUF_SIZE, "%s,%d,%s,%s,%d", bridge.id, PROTO_MODULE, md->id, md->device, md->enabled);
-				mqtt_publish(mosq, dev->topic, gbuf);
-			}
+	if (to_dev->md_deps->type == MODULES_SERIAL) {
+		if (!bridge.serial_ready) {
+			snprintf(gbuf, GBUF_SIZE, "%s,%d,%d,%s", to_dev->id, PROTOCOL_ERROR, ERROR_MD_NOT_AVAILABLE, md->id);
+			mqtt_publish(mosq, from_dev_topic, gbuf);
 			return;
-		case PROTO_MD_GET_TOPIC:
-			// Message from a MQTT device
-			if (dev->md_deps->type == MODULE_MQTT) {
-				snprintf(gbuf, GBUF_SIZE, "%s,%d,%s,%s", bridge.id, PROTO_MD_TOPIC, md->id, md->topic);
-				mqtt_publish(mosq, dev->topic, gbuf);
-			}
+		}
+	}
+
+	if (proto_code == PROTOCOL_MD_INFO) {
+		if (md->specs) {
+			snprintf(gbuf, GBUF_SIZE, "%s,%d,%s,%d,%s,%s", to_dev->id, PROTOCOL_MD_INFO, md->id, md->enabled, md->topic, md->specs);
+		}
+		else {
+			snprintf(gbuf, GBUF_SIZE, "%s,%d,%s,%d,%s", to_dev->id, PROTOCOL_MD_INFO, md->id, md->enabled, md->topic);
+		}
+		mqtt_publish(mosq, from_dev_topic, gbuf);
+	}
+	else if (proto_code == PROTOCOL_MD_ENABLE) {
+		if (md->enabled) {
+			snprintf(gbuf, GBUF_SIZE, "%s,%d,%s", to_dev->id, PROTOCOL_MD_ENABLE, md->id);
+			mqtt_publish(mosq, from_dev_topic, gbuf);
 			return;
-		case PROTO_MD_SET_TOPIC:
-		case PROTO_MD_TOPIC:
-			code = device_set_md_topic(md, msg);
-			if (code == -1) {		// Memory problem
-				run = 0;
+		}
+		if (to_dev->md_deps->type == MODULES_SERIAL) {
+			snprintf(gbuf, GBUF_SIZE, "%s%s,%s,%d,%s", SERIAL_INIT_CONFIG, to_dev->id, from_dev_id, PROTOCOL_MD_ENABLE, md->id);
+			serialport_send(sd, gbuf);
+		}
+	}
+	else if (proto_code == PROTOCOL_MD_DISABLE) {
+		if (to_dev->md_deps->type == MODULES_SERIAL) {
+			if (!md->enabled) {
+				snprintf(gbuf, GBUF_SIZE, "%s,%d,%s", to_dev->id, PROTOCOL_MD_DISABLE, md->id);
+				mqtt_publish(mosq, from_dev_topic, gbuf);
 				return;
 			}
-			if (code == 0) {		// Module topic changed
-				snprintf(gbuf, GBUF_SIZE, "%d,%s,%s", PROTO_MD_TOPIC, md->id, md->topic);
-				mqtt_publish(mosq, bridge.status_topic, gbuf);
+			snprintf(gbuf, GBUF_SIZE, "%s%s,%s,%d,%s", SERIAL_INIT_CONFIG, to_dev->id, from_dev_id, PROTOCOL_MD_DISABLE, md->id);
+			serialport_send(sd, gbuf);
+		}
+		else if (!strcmp(to_dev->id,  bridge.bridge_dev->id)) {
+			if (!strcmp(md->id, MODULES_BRIDGE_ID)) {
+				// Bridge module cannot be disabled
+				snprintf(gbuf, GBUF_SIZE, "%s,%d,%d,%s", to_dev->id, PROTOCOL_ERROR, ERROR_MD_NOT_AVAILABLE, md->id);
+			} else {
+				snprintf(gbuf, GBUF_SIZE, "%s,%d,%d,%s", to_dev->id, PROTOCOL_ERROR, ERROR_MD_NOT_IPM, md->id);
 			}
+			mqtt_publish(mosq, from_dev_topic, gbuf);
+		}
+	}
+	else if (PROTOCOL_MD_TOPIC) {
+		if (!bridge_isValid_module_topic(msg)) {
+			snprintf(gbuf, GBUF_SIZE, "%s,%d,%d,%s", to_dev->id, PROTOCOL_ERROR, ERROR_MD_INV_TOPIC, md->id);
+			mqtt_publish(mosq, from_dev_topic, gbuf);
+			if (config.debug > 1) printf("MQTT - Device: %s - Error: %d\n", from_dev_id, ERROR_MD_INV_TOPIC);
 			return;
-		case PROTO_MD_RAW:
-			mqtt_publish(mosq, md->topic, msg);
+		}
+		if (to_dev->md_deps->type == MODULES_SERIAL) {
+			snprintf(gbuf, GBUF_SIZE, "%s%s,%s,%d,%s,%s", SERIAL_INIT_CONFIG, to_dev->id, from_dev_id, PROTOCOL_MD_TOPIC, md->id, msg);
+			serialport_send(sd, gbuf);
+		}
+		else if (!strcmp(to_dev->id,  bridge.bridge_dev->id)) {
+			bridge_set_md_topic(md, msg);
+			snprintf(gbuf, GBUF_SIZE, "%d,%s,%s", PROTOCOL_MD_TOPIC, md->id, md->topic);
+			mqtt_publish(mosq, bridge.bridge_dev->status_topic, gbuf);
+		}
+	}
+	else if (proto_code == PROTOCOL_MD_OPTIONS) {
+		if (to_dev->md_deps->type == MODULES_SERIAL) {
+			snprintf(gbuf, GBUF_SIZE, "%s%s,%s,%d,%s,%s", SERIAL_INIT_CONFIG, to_dev->id, from_dev_id, PROTOCOL_MD_OPTIONS, md->id, msg);
+			serialport_send(sd, gbuf);
 			return;
-		case PROTO_MD_TO_RAW:
-			// Target module at serial
-			if (target_dev->md_deps->type == MODULE_SERIAL && bridge.serial_ready) {
-				snprintf(gbuf, GBUF_SIZE, "%s%s,%d,%s,%s", SERIAL_INIT_MSG, target_dev->id, PROTO_MD_TO_RAW, md->id, msg);
-				serialport_printlf(sd, gbuf);
-			}
-			// Target module at MQTT
-			else if (target_dev->md_deps->type == MODULE_MQTT) {
-				snprintf(gbuf, GBUF_SIZE, "%s,%d,%s,%s", bridge.id, PROTO_MD_TO_RAW, md->id, msg);
-				mqtt_publish(mosq, target_dev->topic, gbuf);
-			}
-			else if (!strcmp(md->device, bridge.id)) {
-				if (md->type == MODULE_SCRIPT) {
-					code = run_script(config.scripts_folder, msg, gbuf, GBUF_SIZE, config.debug);
-					if (code == -1) {
+		}
+		else if (!strcmp(to_dev->id,  bridge.bridge_dev->id)) {
+			if (md->type == MODULES_SCRIPT) {
+				if (!utils_getInt(&msg, &num)) {
+					snprintf(gbuf, GBUF_SIZE, "%s,%d,%d,%s", to_dev->id, PROTOCOL_ERROR, ERROR_INV_DATA, md->id);
+					mqtt_publish(mosq, from_dev_topic, gbuf);
+					if (config.debug > 1) printf("MQTT - Device: %s - Invalid script module message\n", from_dev_id);
+					return;
+				}
+				if (num == MODULES_SCRIPT_LIST) {
+					snprintf(gbuf, GBUF_SIZE, "%s,%d,%d,%s", to_dev->id, PROTOCOL_ERROR, ERROR_MD_NOT_IPM, md->id);
+					mqtt_publish(mosq, from_dev_topic, gbuf);
+					return;
+				}
+				else if (num == MODULES_SCRIPT_EXECUTE) {
+					if (strlen(msg) == 0) {
+						snprintf(gbuf, GBUF_SIZE, "%s,%d,%d,%s", to_dev->id, PROTOCOL_ERROR, ERROR_MD_INV_OPTS, md->id);
+						mqtt_publish(mosq, from_dev_topic, gbuf);
+						if (config.debug > 1) printf("MQTT - Device: %s - Invalid script module message\n", from_dev_id);
+						return;
+					}
+					rc = utils_run_script(config.scripts_folder, msg, gbuf, GBUF_SIZE, config.debug);
+					if (rc == -1) {
 						run = 0;
 					}
-					else if (code == 1) {
-						mqtt_publish(mosq, md->topic, "0");	
+					else if (rc == 1) {
+						mqtt_publish(mosq, md->topic, "0");        
 					}
-					else if (code == 0) {
+					else if (rc == 0) {
 						if (strlen(gbuf) > 0) {
 							if (config.debug > 1) printf("Script output:\n-\n%s\n-\n", gbuf);
 							mqtt_publish(mosq, md->topic, gbuf);
@@ -376,24 +390,30 @@ void bridge_message(struct mosquitto *mosq, int sd, struct device *dev, char *ms
 						}
 					}
 				}
-				else if (md->type == MODULE_BANDWIDTH) {
-					if (bandwidth) {
-						if (mqtt_publish_bandwidth(mosq, md->topic) == -1)
-							run = 0;
-					}
+				else {
+					snprintf(gbuf, GBUF_SIZE, "%s,%d,%d,%s", to_dev->id, PROTOCOL_ERROR, ERROR_MD_INV_OPTS, md->id);
+					mqtt_publish(mosq, from_dev_topic, gbuf);
+					if (config.debug > 1) printf("MQTT - Device: %s - Error: %d\n", from_dev_id, ERROR_MD_INV_OPTS);
+					return;
 				}
-				else if (md->type == MODULE_SERIAL) {
-					snprintf(gbuf, GBUF_SIZE, "%d", bridge.serial_ready);
-					mqtt_publish(mosq, md->topic, gbuf);
-				}
+				return;
 			}
-			return;
-		case PROTO_MD_ENABLE:			//TODO: implement
-		case PROTO_MD_GET_ENABLE:		//TODO: implement
-		case PROTO_MD_SET_ENABLE: 		//TODO: implement
-			return;
-		default:
-			if (config.debug > 2) printf("Bridge - code: %d - Not treated.\n", code);
+			else if (md->type == MODULES_BANDWIDTH) {
+				snprintf(gbuf, GBUF_SIZE, "%s,%d,%s,%d,%.0f,%.0f", to_dev->id, PROTOCOL_MD_OPTIONS, md->id, MODULES_GENERIC_RAW, upspeed, downspeed);
+				mqtt_publish(mosq, from_dev_topic, gbuf);
+				return;
+			}
+			else if (md->type == MODULES_SERIAL) {
+				snprintf(gbuf, GBUF_SIZE, "%s,%d,%s,%d,%d", to_dev->id, PROTOCOL_MD_OPTIONS, md->id, MODULES_GENERIC_RAW, bridge.serial_ready);
+				mqtt_publish(mosq, from_dev_topic, gbuf);
+				return;
+			}
+			else {
+				snprintf(gbuf, GBUF_SIZE, "%s,%d,%d,%s", to_dev->id, PROTOCOL_ERROR, ERROR_MD_NOT_IPM, md->id);
+				mqtt_publish(mosq, from_dev_topic, gbuf);
+				return;
+			}
+		}
 	}
 }
 
@@ -401,65 +421,250 @@ void on_mqtt_message(struct mosquitto *mosq, void *obj, const struct mosquitto_m
 {
 	char *payload;
 	int *sd;
-	char id[DEVICE_ID_SIZE + 1];
-	struct device *dev;
-	int rc;
+	char dev_id[DEVICE_ID_SIZE + 1];
+	char from_dev_id[DEVICE_ID_SIZE + 1];
+	struct device *to_dev;
 
 	sd = (int *)obj;
 	payload  = (char *)msg->payload;
 
-	if (config.debug > 2) printf("MQTT - topic: %s - payload: %s\n", msg->topic, payload);
+	if (config.debug > 2) printf("MQTT IN - topic: %s - payload: %s\n", msg->topic, payload);
 
-	if (!strcmp(msg->topic, bridge.config_topic)) {
-		if (getString(&payload, id, DEVICE_ID_SIZE, ',') != DEVICE_ID_SIZE) {
-			if (config.debug > 1) printf("MQTT - Invalid data.\n");
-			return;
-		}
-	} else {
-		strncpy(id, &msg->topic[7], DEVICE_ID_SIZE);	// 7 - strlen("config/");
-	}
-
-	if (!device_isValid_id(id)) {
-		if (config.debug > 1) printf("MQTT - Invalid device id.\n");
+	// Get device id from payload
+	if (utils_getString(&payload, from_dev_id, DEVICE_ID_SIZE, ',') != DEVICE_ID_SIZE) {
+		if (config.debug > 1) printf("MQTT - Error: %d\n", ERROR_MIS_DEVICE_ID);
 		return;
 	}
 
-	dev = device_get(&bridge, id);
-	if (!dev) {
-		rc = device_load(&bridge, config.devices_folder, id);
-		if (rc == -1) {
-			run = 0;
-			return;
-		}
-		if (rc) {
-			rc = device_add_dev(&bridge, id, MODULE_MQTT_ID);
-			if (rc == -1) {
-				run = 0;
-				return;
-			}
-			if (rc) {
-				if (config.debug > 2) printf("MQTT - Failed to add device.\n");
-				return;
-			}
-		}
-		dev = device_get(&bridge, id);
-		if (config.debug > 1) printf("New device:\n");
-		device_print_device(dev);
-		if (dev->type == DEVICE_TYPE_NODE) {
-			snprintf(gbuf, GBUF_SIZE, "status/%s", dev->id);
-			rc = mosquitto_subscribe(mosq, NULL, gbuf, config.mqtt_qos);
-			if (rc) {
-				fprintf(stderr, "MQTT - Subscribe ERROR: %s\n", mosquitto_strerror(rc));
-				run = 0;
-				return;
-			}
-		} else if (dev->type == DEVICE_TYPE_CONTROLLER) {
-			bridge.controller = true;
-		}
-	} else
-		dev->alive = ALIVE_CNT;
+	strncpy(dev_id, &msg->topic[DEVICE_TOPIC_CONFIG_LEN], DEVICE_ID_SIZE + 1);
+	if (!strcmp(dev_id, bridge.bridge_dev->id)) {
+		// Message to bridge
+		to_dev = bridge.bridge_dev;
+	} else {
+		// Message to a device
+		to_dev = bridge_get_device(&bridge, dev_id);
+	}
 
-	bridge_message(mosq, *sd, dev, payload);
+	if (!to_dev) {
+		fprintf(stderr, "MQTT - Error: Failed to get device: %s\n", dev_id);
+		return;
+	}
+
+	mqtt_to_device(mosq, *sd, to_dev, from_dev_id, payload);
+}
+
+void device_status_to_mqtt(struct mosquitto *mosq, int sd, struct device *from_dev, char *msg)
+{
+	char md_id[MODULES_ID_SIZE + 1];
+	
+	struct module *md;
+	int proto_code, num, beacon_num, next_alive;
+
+	// Get protocol code from msg
+	if (!utils_getInt(&msg, &proto_code)) {
+		if (config.debug > 1) printf("Device: %s - Error: %d\n", from_dev->id, ERROR_MIS_PROTOCOL);
+		return;
+	}
+
+	switch (proto_code) {
+		case PROTOCOL_ERROR:
+			if (config.debug > 1) printf("Device: %s - Error received: %s\n", from_dev->id, msg);
+			snprintf(gbuf, GBUF_SIZE, "%d,%s", PROTOCOL_ERROR, msg);
+			mqtt_publish(mosq, from_dev->status_topic, gbuf);
+			return;
+		case PROTOCOL_ALIVE:
+			if (!utils_getInt(&msg, &num)) {
+				if (config.debug > 1) printf("Device: %s - Invalid alive message.\n", from_dev->id);
+				return;
+			}
+			if (!utils_getInt(&msg, &beacon_num)) {
+				if (config.debug > 1) printf("Device: %s - Invalid alive message.\n", from_dev->id);
+				return;
+			}
+			if (!utils_getInt(&msg, &next_alive)) {
+				if (config.debug > 1) printf("Device: %s - Invalid alive message.\n", from_dev->id);
+				return;
+			}
+			if (from_dev->modules != num) {
+				if (from_dev->md_deps->type == MODULES_SERIAL) {
+					if (config.debug > 2) printf("Sending get modules to serial.\n");
+					snprintf(gbuf, GBUF_SIZE, "%s%s,%s,%d", SERIAL_INIT_CONFIG, from_dev->id, bridge.bridge_dev->id, PROTOCOL_MODULES);
+					serialport_send(sd, gbuf);
+				}
+				return;
+			}
+			from_dev->alive = next_alive * 2;
+			snprintf(gbuf, GBUF_SIZE, "%d,%d,%d,%d", PROTOCOL_ALIVE, from_dev->modules, beacon_num, next_alive);
+			mqtt_publish(mosq, from_dev->status_topic, gbuf);
+			return;
+		case PROTOCOL_MD_ENABLE:
+		case PROTOCOL_MD_DISABLE:
+		case PROTOCOL_MD_TOPIC:
+		case PROTOCOL_MD_OPTIONS:
+		case PROTOCOL_MD_RAW:
+			// Get module id from msg
+			if (!utils_getString(&msg, md_id, MODULES_ID_SIZE, ',')) {
+				if (config.debug > 1) printf("Device: %s - Error: %d\n", from_dev->id, ERROR_MIS_MODULE_ID);
+				return;
+			}
+			if (!bridge_isValid_module_id(md_id)) {
+				if (config.debug > 1) printf("Device: %s - Error: %d\n", from_dev->id, ERROR_MD_INV_ID); 
+				return;
+			}
+			md = bridge_get_module(from_dev, md_id);
+			if (!md) {
+				if (config.debug > 1) printf("Device: %s - Error: %d\n", from_dev->id, ERROR_MD_NOT_FOUND);
+				return;
+			}
+
+			if (proto_code == PROTOCOL_MD_ENABLE) {
+				if (md->enabled)
+					return;
+				md->enabled = true;
+				snprintf(gbuf, GBUF_SIZE, "%d,%s", PROTOCOL_MD_ENABLE, md->id);
+				mqtt_publish(mosq, from_dev->status_topic, gbuf);
+			}
+			else if (proto_code == PROTOCOL_MD_DISABLE) {
+				if (!md->enabled)
+					return;
+				md->enabled = false;
+				snprintf(gbuf, GBUF_SIZE, "%d,%s", PROTOCOL_MD_DISABLE, md->id);
+				mqtt_publish(mosq, from_dev->status_topic, gbuf);
+			}
+			else if (proto_code == PROTOCOL_MD_TOPIC) {
+				if (!bridge_set_md_topic(md, msg)) {
+					if (config.debug > 1) printf("Device: %s - Error: %d\n", from_dev->id, ERROR_MD_INV_TOPIC);
+					return;
+				}
+				snprintf(gbuf, GBUF_SIZE, "%d,%s,%s", PROTOCOL_MD_TOPIC, md->id, md->topic);
+				mqtt_publish(mosq, from_dev->status_topic, gbuf);
+			}	
+			else if (proto_code == PROTOCOL_MD_OPTIONS) {
+				snprintf(gbuf, GBUF_SIZE, "%d,%s,%s", PROTOCOL_MD_OPTIONS, md->id, msg);
+				mqtt_publish(mosq, from_dev->status_topic, gbuf);
+			}
+			else if (proto_code == PROTOCOL_MD_RAW) {
+				mqtt_publish(mosq, md->topic, msg);
+			}
+			return;
+		default:
+			if (config.debug > 1) printf("Device: %s - Error: %d\n", from_dev->id, ERROR_INV_DATA);
+			return;
+	}
+}
+
+void device_config_to_mqtt(struct mosquitto *mosq, int sd, struct device *from_dev, char *to_dev_id, char *msg)
+{
+	char md_id[MODULES_ID_SIZE + 1];
+	char md_topic[DEVICE_TOPIC_MAX_SIZE + 1];
+	char md_specs[DEVICE_SPECS_MAX_SIZE + 1];
+	struct module *md;
+	const int to_dev_topic_size = DEVICE_TOPIC_CONFIG_LEN + DEVICE_ID_SIZE + 1;
+	char to_dev_topic[to_dev_topic_size];
+	int proto_code, num;
+
+	if (!utils_getInt(&msg, &proto_code)) {
+		if (config.debug > 1) printf("Device: %s - Error: %d\n", from_dev->id, ERROR_MIS_PROTOCOL);
+		return;
+	}
+
+	snprintf(to_dev_topic, to_dev_topic_size, "%s%s", DEVICE_TOPIC_CONFIG, to_dev_id);
+
+	switch (proto_code) {
+		case PROTOCOL_ALIVE:
+		case PROTOCOL_TIMEOUT:
+		case PROTOCOL_MD_ENABLE:
+		case PROTOCOL_MD_DISABLE:
+		case PROTOCOL_MD_TOPIC:
+		case PROTOCOL_MD_RAW:
+			if (config.debug > 1) printf("Device: %s - Error: %d\n", from_dev->id, ERROR_INV_DATA);
+			return;
+		case PROTOCOL_ERROR:
+			snprintf(gbuf, GBUF_SIZE, "%s,%d,%s", from_dev->id, PROTOCOL_ERROR, msg);
+			mqtt_publish(mosq, to_dev_topic, gbuf);
+			if (config.debug > 1) printf("Device: %s - Error received: %s\n", from_dev->id, msg);
+			return;
+		case PROTOCOL_MODULES:
+			while (utils_getString(&msg, md_id, MODULES_ID_SIZE, ',')) {
+				if (!bridge_isValid_module_id(md_id)) {
+					if (config.debug > 1) printf("Device: %s - Error: %d\n", from_dev->id, ERROR_MD_INV_ID); 
+					continue;
+				}
+				md = bridge_add_module(from_dev, md_id, false);
+				if (!md) {
+					if (config.debug > 1) printf("Failed to add module: %s\n", md_id);
+					continue;
+				}
+				printf("New Module: %s - from: %s\n", md->id, from_dev->id);
+
+				snprintf(gbuf, GBUF_SIZE, "%s%s,%s,%d,%s", SERIAL_INIT_CONFIG, from_dev->id, bridge.bridge_dev->id, PROTOCOL_MD_INFO, md->id);
+				serialport_send(sd, gbuf);
+			}
+			return;
+	}
+
+	// Get module id from msg
+	if (!utils_getString(&msg, md_id, MODULES_ID_SIZE, ',')) {
+		if (config.debug > 1) printf("Device: %s - Error: %d\n", from_dev->id, ERROR_MIS_MODULE_ID);
+		return;
+	}
+	if (!bridge_isValid_module_id(md_id)) {
+		if (config.debug > 1) printf("Device: %s - Error: %d\n", from_dev->id, ERROR_MD_INV_ID); 
+		return;
+	}
+	md = bridge_get_module(from_dev, md_id);
+	if (!md) {
+		if (config.debug > 1) printf("Device: %s - Error: %d\n", from_dev->id, ERROR_MD_NOT_FOUND);
+		return;
+	}
+
+	switch (proto_code) {
+		case PROTOCOL_MD_INFO:
+			// Module enable/disable
+			if (!utils_getInt(&msg, &num) || (num != 0 && num != 1)) {
+				if (config.debug > 1) printf("Device: %s - Error: %d\n", from_dev->id, ERROR_MD_INV_INFO);
+				return;
+			}
+			// Module topic
+			if (!utils_getString(&msg, md_topic, DEVICE_TOPIC_MAX_SIZE, ',')) {
+				if (config.debug > 1) printf("Device: %s - Error: %d\n", from_dev->id, ERROR_MD_INV_INFO);
+				return;
+			}
+			// Module specs
+			md_specs[0] = 0;
+			utils_getString(&msg, md_specs, DEVICE_SPECS_MAX_SIZE, ',');
+
+			md->enabled = false;
+			if (!bridge_set_md_topic(md, md_topic)) {
+				if (config.debug > 1) printf("Device: %s - Error: %d\n", from_dev->id, ERROR_MD_INV_INFO);
+				return;
+			}
+			if (strlen(md_specs) == 0) {
+				if (md->specs) {
+					free(md->specs);
+					md->specs = NULL;
+				}
+			} else {
+				if (!bridge_set_module_specs(md, md_specs)) {
+					if (config.debug > 1) printf("Device: %s - Error: %d\n", from_dev->id, ERROR_MD_INV_INFO);
+					return;
+				}
+			}
+			md->enabled = num;
+
+			if (config.debug > 1) {
+				printf("Module:\n");
+				bridge_print_module(md);
+			}
+			return;
+		case PROTOCOL_MD_OPTIONS:
+			snprintf(gbuf, GBUF_SIZE, "%s,%d,%s", from_dev->id, PROTOCOL_MD_OPTIONS, msg);
+			mqtt_publish(mosq, to_dev_topic, gbuf);
+			return;
+		default:
+			if (config.debug > 1) printf("Device: %s - Error: %d\n", from_dev->id, ERROR_INV_PROTOCOL);
+			return;
+	}
 }
 
 int serial_in(int sd, struct mosquitto *mosq, char *md_id)
@@ -487,10 +692,10 @@ int serial_in(int sd, struct mosquitto *mosq, char *md_id)
 	buf_len += sread;
 
 	if (serial_buf[buf_len - 1] == eolchar) {
-		serial_buf[buf_len - 1] = 0;		//replace eolchar
-		buf_len--;					// eolchar was counted, decreasing 1
+		serial_buf[buf_len - 1] = 0;			//replace eolchar
+		buf_len--;								// eolchar was counted, decreasing 1
 		if (config.debug > 3) printf("Serial - size:%d, serial_buf:%s\n", buf_len, serial_buf);
-		if (buf_len < SERIAL_INIT_LEN) {	// We need at least SERIAL_INIT_LEN to count as a valid command
+		if (buf_len < SERIAL_INIT_LEN) {		// We need at least SERIAL_INIT_LEN to count as a valid command
 			if (config.debug > 1) printf("Invalid serial input.\n");
 			buf_len = 0;
 			return 0;
@@ -502,48 +707,64 @@ int serial_in(int sd, struct mosquitto *mosq, char *md_id)
 
 		// Serial debug
 		if (!strncmp(serial_buf, SERIAL_INIT_DEBUG, SERIAL_INIT_LEN)) {
-			if (config.debug) printf("Debug: %s\n", buf_p);
+			if (config.debug) {
+				printf("Device Debug: %s\n", buf_p);
+				snprintf(gbuf, GBUF_SIZE, "%d,%s,%d,%s", PROTOCOL_MD_OPTIONS, MODULES_BRIDGE_ID, MODULES_BRIDGE_DEBUG, buf_p);
+				mqtt_publish(mosq, bridge.bridge_dev->status_topic, gbuf);
+			}
 			return sread;
 		}
-		else if (!strncmp(serial_buf, SERIAL_INIT_MSG, SERIAL_INIT_LEN)) {
-			if (config.debug > 2) printf("Serial - message: %s\n", serial_buf);
+		else if ((!strncmp(serial_buf, SERIAL_INIT_STATUS, SERIAL_INIT_LEN)) ||
+			(!strncmp(serial_buf, SERIAL_INIT_CONFIG, SERIAL_INIT_LEN)))
+		{
+			if (config.debug > 2) printf("Serial IN - Message: %s\n", serial_buf);
 
-			if (getString(&buf_p, id, DEVICE_ID_SIZE, ',') != DEVICE_ID_SIZE) {
-				if (config.debug > 1) printf("Serial - Invalid data.\n");
+			// Get device id from buf
+			if (utils_getString(&buf_p, id, DEVICE_ID_SIZE, ',') != DEVICE_ID_SIZE) {
+				if (config.debug > 1) printf("Serial - Error: %d\n", ERROR_MIS_DEVICE_ID);
+				return 0;
+			}
+			if (!bridge_isValid_device_id(id)) {
+				if (config.debug > 1) printf("Serial - Error: %d\n", ERROR_DEV_INV_ID);
 				return 0;
 			}
 
-			if (!device_isValid_id(id)) {
-				if (config.debug > 1) printf("Serial - Invalid device id.\n");
-				return 0;
-			}
-
-			dev = device_get(&bridge, id);
+			dev = bridge_get_device(&bridge, id);
 			if (!dev) {
-				rc = device_load(&bridge, config.devices_folder, id);
-				if (rc == -1) {
+				dev = bridge_add_device(&bridge, id, md_id);
+				if (!dev) {
+					if (config.debug > 1) printf("Serial - Failed to add device.\n");
+					return sread;
+				}
+
+				rc = mosquitto_subscribe(mosq, NULL, dev->config_topic, config.mqtt_qos);
+				if (rc) {
+					fprintf(stderr, "MQTT - Subscribe ERROR: %s\n", mosquitto_strerror(rc));
 					run = 0;
 					return sread;
 				}
-				if (rc) {
-					rc = device_add_dev(&bridge, id, md_id);
-					if (rc == -1) {
-						run = 0;
-						return sread;
-					}
-					if (rc) {
-						if (config.debug > 2) printf("Serial - Failed to add device.\n");
-						return sread;
-					}
-				}
-				dev = device_get(&bridge, id);
-				if (config.debug > 1) {
+				if (config.debug > 2) printf("Subscribe topic: %s\n", bridge.bridge_dev->config_topic);
+
+				if (config.debug > 2) {
 					printf("New device:\n");
-					device_print_device(dev);
+					bridge_print_device(dev);
 				}
-			} else
-				dev->alive = ALIVE_CNT;
-			bridge_message(mosq, sd, dev, buf_p);
+			}
+
+			if (!strncmp(serial_buf, SERIAL_INIT_CONFIG, SERIAL_INIT_LEN)) {
+				// Get device id from buf
+				if (utils_getString(&buf_p, id, DEVICE_ID_SIZE, ',') != DEVICE_ID_SIZE) {
+					if (config.debug > 1) printf("Serial - Error: %d\n", ERROR_MIS_DEVICE_ID);
+					return 0;
+				}
+				if (!bridge_isValid_device_id(id)) {
+					if (config.debug > 1) printf("Serial - Error: %d\n", ERROR_DEV_INV_ID);
+					return 0;
+				}
+				device_config_to_mqtt(mosq, sd, dev, id, buf_p);
+			} else {
+				device_status_to_mqtt(mosq, sd, dev, buf_p);
+			}
 		} else {
 			if (config.debug > 1) printf("Unknown serial data.\n");
 		}
@@ -560,40 +781,34 @@ int serial_in(int sd, struct mosquitto *mosq, char *md_id)
 
 void signal_usr(int sd, struct mosquitto *mosq)
 {
-	struct device *md_dev;
-	struct module *md;
-	char md_id[DEVICE_MD_ID_SIZE + 1];
+	struct device *dev;
 
-	if (user_signal == MODULE_SIGUSR1) {
-		if (config.remap_usr1)
-			strcpy(md_id, config.remap_usr1);
-		else
-			strcpy(md_id, MODULE_SIGUSR1_ID);
-	}
-	else if (user_signal == MODULE_SIGUSR2) {
-		if (config.remap_usr2)
-			strcpy(md_id, config.remap_usr2);
-		else
-			strcpy(md_id, MODULE_SIGUSR2_ID);
-	}
-
-	md = device_get_module(&bridge, md_id);
-	if (md) {
-		md_dev = device_get(&bridge, md->device);
-		if (!md_dev) {
-			fprintf(stderr, "Error: Orphan module.\n");
-			device_remove_module(&bridge, md_id);
-			user_signal = 0;
-			return;
+	if (user_signal == MODULES_BRIDGE_SIGUSR1) {
+		if (config.remap_usr1_dev) {
+			dev = bridge_get_device(&bridge, config.remap_usr1_dev);
+			if (dev) {
+				snprintf(gbuf, GBUF_SIZE, "%s%s,%s,%d,%s,%d", SERIAL_INIT_CONFIG, dev->id, bridge.bridge_dev->id, PROTOCOL_MD_OPTIONS, config.remap_usr1_md, config.remap_usr1_md_code);
+				serialport_send(sd, gbuf);
+			}
+		} else if (connected) {
+			snprintf(gbuf, GBUF_SIZE, "%d,%s,%d", PROTOCOL_MD_OPTIONS, MODULES_BRIDGE_ID, MODULES_BRIDGE_SIGUSR1);
+			mqtt_publish(mosq, bridge.bridge_dev->status_topic, gbuf);
 		}
-		if (md_dev->md_deps->type == MODULE_SERIAL && bridge.serial_ready) {
-				snprintf(gbuf, GBUF_SIZE, "%s%s,%d,%s", SERIAL_INIT_MSG, md_dev->id, PROTO_MD_RAW, md->id);
-				serialport_printlf(sd, gbuf);
-		}
-
-		if (connected)
-			mqtt_publish(mosq, md->topic, "1");
 	}
+
+	if (user_signal == MODULES_BRIDGE_SIGUSR2) {
+		if (config.remap_usr2_dev) {
+			dev = bridge_get_device(&bridge, config.remap_usr2_dev);
+			if (dev) {
+				snprintf(gbuf, GBUF_SIZE, "%s%s,%s,%d,%s,%d", SERIAL_INIT_CONFIG, dev->id, bridge.bridge_dev->id, PROTOCOL_MD_OPTIONS, config.remap_usr2_md, config.remap_usr2_md_code);
+				serialport_send(sd, gbuf);
+			}
+		} else if (connected) {
+			snprintf(gbuf, GBUF_SIZE, "%d,%s,%d", PROTOCOL_MD_OPTIONS, MODULES_BRIDGE_ID, MODULES_BRIDGE_SIGUSR2);
+			mqtt_publish(mosq, bridge.bridge_dev->status_topic, gbuf);
+		}
+	}
+
 	user_signal = 0;
 }
 
@@ -605,9 +820,10 @@ void serial_hang(struct mosquitto *mosq)
 	bridge.serial_alive = 0;
 
 	if (connected) {
-		md = device_get_module(&bridge, MODULE_SERIAL_ID);
+		md = bridge_get_module(bridge.bridge_dev, MODULES_SERIAL_ID);
 		if (md) {
-			mqtt_publish(mosq, md->topic, "0");		// Serial is down message
+			snprintf(gbuf, GBUF_SIZE, "%d", MODULES_SERIAL_ERROR);
+			mqtt_publish(mosq, md->topic, gbuf);
 		}
 	}
 }
@@ -628,6 +844,8 @@ int main(int argc, char *argv[])
 	int rc;
 	int i;
 	
+	gbuf[0] = 0;
+
 	if (!quiet) printf("Version: %s\n", version);
 
     signal(SIGINT, handle_signal);
@@ -655,23 +873,22 @@ int main(int argc, char *argv[])
 		}
 	}
 	
-	if(!conf_file) {
+	if (!conf_file) {
 		fprintf(stderr, "Error: No config file given.\n");
 		return 1;
 	}
 
 	memset(&config, 0, sizeof(struct bridge_config));
-	if(config_parse(conf_file, &config)) return 1;
+	if (config_parse(conf_file, &config)) return 1;
 	
 	if (quiet) config.debug = 0;
 	if (config.debug != 0) printf("Debug: %d\n", config.debug);
 
-	if (!device_isValid_id(config.id)) {
-		fprintf(stderr, "Invalid id.\n");
-		return -1;
-	}
-	if (device_init(&bridge, config.id) == -1)
+	rc = bridge_init(&bridge, config.id, MODULES_BRIDGE_ID);
+	if (rc) {
+		if (config.debug) printf("Error: Failed to initialize bridge: %d\n", rc);
 		return 1;
+	}
 
 	mosquitto_lib_init();
 	mosq = mosquitto_new(config.id, true, NULL);
@@ -687,18 +904,17 @@ int main(int argc, char *argv[])
 		}
 		return 1;
 	}
-	snprintf(gbuf, GBUF_SIZE, "%d", PROTO_ST_TIMEOUT);
-	mosquitto_will_set(mosq, bridge.status_topic, strlen(gbuf), gbuf, config.mqtt_qos, MQTT_RETAIN);
+	snprintf(gbuf, GBUF_SIZE, "%d", PROTOCOL_TIMEOUT);
+	mosquitto_will_set(mosq, bridge.bridge_dev->status_topic, strlen(gbuf), gbuf, config.mqtt_qos, MQTT_RETAIN);
+
 	mosquitto_connect_callback_set(mosq, on_mqtt_connect);
 	mosquitto_disconnect_callback_set(mosq, on_mqtt_disconnect);
 	mosquitto_message_callback_set(mosq, on_mqtt_message);
 	mosquitto_user_data_set(mosq, &sd);
 
-	if (config.debug > 1) printf("Subscribe topic: %s\n", bridge.config_topic);
-
-	rc = device_add_module(&bridge, MODULE_MQTT_ID, bridge.id);				//TODO: autogen id?
-	if (rc) {
-		fprintf(stderr, "Failed to add mqtt module.\n");
+	md = bridge_add_module(bridge.bridge_dev, MODULES_MQTT_ID, true);
+	if (!md) {
+		fprintf(stderr, "Failed to add MQTT module.\n");
 		return 1;
 	}
 
@@ -707,33 +923,35 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "Couldn't open scripts folder: %s\n", config.scripts_folder);
 			return 1;
 		}
-		rc = device_add_module(&bridge, MODULE_SCRIPT_ID, bridge.id);		//TODO: autogen id?
-		if (rc) {
+		md = bridge_add_module(bridge.bridge_dev, MODULES_SCRIPT_ID, true);
+		if (!md) {
 			fprintf(stderr, "Failed to add script module.\n");
 			return 1;
 		}
 	}
+
 	if (config.interface) {
 		//TODO: check if interface exists
 		if (access("/proc/net/dev", R_OK )) {
 			fprintf(stderr, "Couldn't open /proc/net/dev\n");
 			return 1;
 		}
-		rc = device_add_module(&bridge, MODULE_BANDWIDTH_ID, bridge.id);		//TODO: autogen id?
-		if (rc) {
+		md = bridge_add_module(bridge.bridge_dev, MODULES_BANDWIDTH_ID, true);
+		if (!md) {
 			fprintf(stderr, "Failed to add bandwidth module.\n");
 			return 1;
 		}
 		bandwidth = true;
 	}
+
 	if (config.serial.port) {
 		sd = serialport_init(config.serial.port, config.serial.baudrate);
 		if( sd == -1 ) {
 			fprintf(stderr, "Couldn't open serial port.\n");
 			return 1;
 		} else {
-			rc = device_add_module(&bridge, MODULE_SERIAL_ID, bridge.id);		//TODO: autogen id?
-			if (rc) {
+			md = bridge_add_module(bridge.bridge_dev, MODULES_SERIAL_ID, true);
+			if (!md) {
 				fprintf(stderr, "Failed to add serial module.\n");
 				return 1;
 			}
@@ -744,23 +962,11 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	rc = device_add_module(&bridge, MODULE_SIGUSR1_ID, bridge.id);			//TODO: autogen id?
-	if (rc) {
-		fprintf(stderr, "Failed to add sigusr1 module.\n");
-		return 1;
-	}
-
-	rc = device_add_module(&bridge, MODULE_SIGUSR2_ID, bridge.id);			//TODO: autogen id?
-	if (rc) {
-		fprintf(stderr, "Failed to add sigusr2 module.\n");
-		return 1;
-	}
-
-	device_print_modules(&bridge);
+	if (config.debug > 2) bridge_print_modules(bridge.bridge_dev);
 
 	rc = mosquitto_connect(mosq, config.mqtt_host, config.mqtt_port, 60);
 	if (rc) {
-		fprintf(stderr, "Wrong MQTT parameters. Check your config.\n");
+		fprintf(stderr, "ERROR: %s\n", mosquitto_strerror(rc));
 		return -1;
 	}
 
@@ -768,75 +974,64 @@ int main(int argc, char *argv[])
 
 	while (run) {
 		if (bridge.serial_ready) {
-			rc = serial_in(sd, mosq, MODULE_SERIAL_ID);
+			rc = serial_in(sd, mosq, MODULES_SERIAL_ID);
 			if (rc == -1) {
 				serial_hang(mosq);
 			} else if (rc > 0) {
-				bridge.serial_alive = ALIVE_CNT;
+				bridge.serial_alive = DEVICE_ALIVE_MAX;
 			}
 		}
 
 		if (user_signal) {
-			if (config.debug > 1) printf("Signal - SIGUSR: %d\n", user_signal);
+			if (config.debug > 2) printf("Signal - SIGUSR: %d\n", user_signal);
 			signal_usr(sd, mosq);
 		}
 
-		rc = mosquitto_loop(mosq, -1, 1);
+		rc = mosquitto_loop(mosq, 100, 1);
 		if (run && rc) {
 			if (config.debug > 2) printf("MQTT loop: %s\n", mosquitto_strerror(rc));
 			usleep(100000);	// wait 100 msec
 			mosquitto_reconnect(mosq);
 		}
+		usleep(20);
+
+		if (every1s) {
+			every1s = false;
+
+			for (dev = bridge.dev_list; dev != NULL; dev = dev->next) {
+				if (dev->alive) {
+					dev->alive--;
+					if (!dev->alive) {
+						if (connected) {
+							snprintf(gbuf, GBUF_SIZE, "%d", PROTOCOL_TIMEOUT);
+							mqtt_publish(mosq, dev->status_topic, gbuf);
+							rc = mosquitto_unsubscribe(mosq, NULL, dev->config_topic);
+							if (rc)
+								fprintf(stderr, "Error: MQTT unsubscribe returned: %s\n", mosquitto_strerror(rc));
+						}
+						if (config.debug) printf("Device: %s - Timeout.\n", dev->id);
+						bridge_remove_device(&bridge, dev->id);
+					}
+				}
+			}
+		}
 
 		if (every30s) {
 			every30s = false;
 
-			bridge.controller = false;
-			for (i = 0; i < bridge.devices_len; i++) {
-				dev = &bridge.devices[i];
-				if (dev->alive) {
-					dev->alive--;
-					if (!dev->alive) {
-						snprintf(gbuf, GBUF_SIZE, "%d,%s", PROTO_ST_TIMEOUT, dev->id);
-						mqtt_publish(mosq, bridge.status_topic, gbuf);
-
-						if (dev->md_deps->type == MODULE_MQTT && dev->type == DEVICE_TYPE_NODE) {
-							snprintf(gbuf, GBUF_SIZE, "status/%s", dev->id);
-							rc = mosquitto_unsubscribe(mosq, NULL, gbuf);
-							if (rc)
-								fprintf(stderr, "Error: MQTT unsubscribe returned: %s\n", mosquitto_strerror(rc));
-						}
-
-						if (config.debug) printf("Device timeout - id: %s\n", dev->id);
-					} else {
-						if (dev->type == DEVICE_TYPE_CONTROLLER)
-							bridge.controller = true;
-					}
-				}
-			}
-
-			if (!bridge.controller)
-				bridge.modules_update = false;
-
 			if (connected) {
-				snprintf(gbuf, GBUF_SIZE, "%d,%d", PROTO_ST_ALIVE, bridge.modules_len);
-				mqtt_publish(mosq, bridge.status_topic, gbuf);
-
-				if (bridge.modules_update) {
-					snprintf(gbuf, GBUF_SIZE, "%d", PROTO_ST_MODULES_UP);
-					if (mqtt_publish(mosq, bridge.status_topic, gbuf))
-						bridge.modules_update = false;
-				}
+				send_alive(mosq);
 
 				if (bandwidth) {
-					md = device_get_module(&bridge, MODULE_BANDWIDTH_ID);
+					md = bridge_get_module(bridge.bridge_dev, MODULES_BANDWIDTH_ID);
 					if (md) {
-						if (mqtt_publish_bandwidth(mosq, md->topic) == -1)
-							break;
+						snprintf(gbuf, GBUF_SIZE, "%.0f,%.0f", upspeed, downspeed);
+						mqtt_publish(mosq, md->topic, gbuf);
+						if (config.debug > 2) printf("down: %f - up: %f\n", downspeed, upspeed);
 					}
 				}
 			} else {
-				if (config.debug != 0) printf("MQTT Offline.\n");
+				if (config.debug) printf("MQTT Offline.\n");
 			}
 
 			if (bridge.serial_alive) {
@@ -850,17 +1045,18 @@ int main(int argc, char *argv[])
 					if (config.debug > 1) printf("Trying to reconnect serial port.\n");
 					serialport_close(sd);
 					sd = serialport_init(config.serial.port, config.serial.baudrate);
-					if( sd == -1 )
+					if( sd == -1 ) {
 						fprintf(stderr, "Couldn't open serial port.\n");
-					else {
+					} else {
 						serialport_flush(sd);
 						bridge.serial_ready = true;
+						snprintf(gbuf, GBUF_SIZE, "%d", MODULES_SERIAL_OPEN);
+						mqtt_publish(mosq, md->topic, gbuf);
 						if (config.debug) printf("Serial reopened.\n");
 					}
 				}
 			}
 		}
-		usleep(20);
 	}
 
 	if (bridge.serial_ready) {

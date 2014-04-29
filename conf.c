@@ -33,7 +33,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <string.h>
 
 #include "mqtt_bridge.h"
-#include "device.h"
+#include "bridge.h"
 
 static int _conf_parse_int(char *token, const char *name, int *value);
 static int _conf_parse_string(char *token, const char *name, char **value);
@@ -56,11 +56,14 @@ int config_parse(const char *config_file, struct bridge_config *config)
 	config->mqtt_port = 1883;
 	config->mqtt_qos = 0;
 	config->serial.port = NULL;
-	config->devices_folder = NULL;
 	config->scripts_folder = NULL;
 	config->interface = NULL;
-	config->remap_usr1 = NULL;
-	config->remap_usr2 = NULL;
+	config->remap_usr1_dev = NULL;
+	config->remap_usr2_dev = NULL;
+	config->remap_usr1_md = NULL;
+	config->remap_usr2_md = NULL;
+	config->remap_usr1_md_code = -1;
+	config->remap_usr2_md_code = -1;
 
 	while (fgets(buf, 1024, fptr)) {
 		if (buf[0] != '#' && buf[0] != 10 && buf[0] != 13) {
@@ -109,11 +112,6 @@ int config_parse(const char *config_file, struct bridge_config *config)
 						fclose(fptr);
 						return 1;
 					}
-				}
-			} else if (!strncmp(buf, "devices_folder ", 15)) {
-				if (_conf_parse_string(&(buf[15]), "devices_folder", &config->devices_folder)) {
-					fclose(fptr);
-					return 1;
 				}
 			} else if (!strncmp(buf, "scripts_folder ", 15)) {
 				if (_conf_parse_string(&(buf[15]), "scripts_folder", &config->scripts_folder)) {
@@ -165,13 +163,57 @@ int config_parse(const char *config_file, struct bridge_config *config)
 					fclose(fptr);
 					return 1;
 				}
-			} else if (!strncmp(buf, "remap_usr1 ", 11)) {
-				if (_conf_parse_string(&(buf[11]), "remap_usr1", &config->remap_usr1)) {
+			} else if (!strncmp(buf, "remap_usr1_dev ", 15)) {
+				if (_conf_parse_string(&(buf[15]), "remap_usr1_dev", &config->remap_usr1_dev)) {
 					fclose(fptr);
 					return 1;
 				}
-			} else if (!strncmp(buf, "remap_usr2 ", 11)) {
-				if (_conf_parse_string(&(buf[11]), "remap_usr2", &config->remap_usr2)) {
+			} else if (!strncmp(buf, "remap_usr2_dev ", 15)) {
+				if (_conf_parse_string(&(buf[15]), "remap_usr2_dev", &config->remap_usr2_dev)) {
+					fclose(fptr);
+					return 1;
+				}
+			} else if (!strncmp(buf, "remap_usr1_md ", 14)) {
+				if (config->remap_usr1_dev) {
+					if (_conf_parse_string(&(buf[14]), "remap_usr1_md", &config->remap_usr1_md)) {
+						fclose(fptr);
+						return 1;
+					}
+				} else {
+					fprintf(stderr, "Error: remap_usr1_md keyword without remap_usr1_dev in config.\n");
+					fclose(fptr);
+					return 1;
+				}
+			} else if (!strncmp(buf, "remap_usr2_md ", 14)) {
+				if (config->remap_usr2_dev) {
+					if (_conf_parse_string(&(buf[14]), "remap_usr2_md", &config->remap_usr2_md)) {
+						fclose(fptr);
+						return 1;
+					}
+				} else {
+					fprintf(stderr, "Error: remap_usr2_md keyword without remap_usr2_dev in config.\n");
+					fclose(fptr);
+					return 1;
+				}
+			} else if (!strncmp(buf, "remap_usr1_md_code ", 19)) {
+				if (config->remap_usr1_md) {
+					if (_conf_parse_int(&(buf[19]), "remap_usr1_md_code", &config->remap_usr1_md_code)) {
+						fclose(fptr);
+						return 1;
+					}
+				} else {
+					fprintf(stderr, "Error: remap_usr1_md_code keyword without remap_usr1_md in config.\n");
+					fclose(fptr);
+					return 1;
+				}
+			} else if (!strncmp(buf, "remap_usr2_md_code ", 19)) {
+				if (config->remap_usr2_md) {
+					if (_conf_parse_int(&(buf[19]), "remap_usr2_md_code", &config->remap_usr2_md_code)) {
+						fclose(fptr);
+						return 1;
+					}
+				} else {
+					fprintf(stderr, "Error: remap_usr2_md_code keyword without remap_usr2_md in config.\n");
 					fclose(fptr);
 					return 1;
 				}
@@ -186,10 +228,56 @@ int config_parse(const char *config_file, struct bridge_config *config)
 		fprintf(stderr, "Error: No id found in config file.\n");
 		return 1;
 	}
-	if (strlen(config->id) != DEVICE_ID_SIZE) {
+
+	if (!bridge_isValid_device_id(config->id)) {
 		fprintf(stderr, "Error: Invalid id.\n");
 		return 1;
 	}
+
+	if (config->remap_usr1_dev) {
+		if (!bridge_isValid_device_id(config->remap_usr1_dev)) {
+			fprintf(stderr, "Error: Invalid remap_usr1_dev device id.\n");
+			return 1;
+		}
+		if (!config->remap_usr1_md) {
+			fprintf(stderr, "Error: No remap_usr1_md found in config file.\n");
+			return 1;
+		}
+	}
+
+	if (config->remap_usr2_dev) {
+		if (!bridge_isValid_device_id(config->remap_usr2_dev)) {
+			fprintf(stderr, "Error: Invalid remap_usr2_dev device id.\n");
+			return 1;
+		}
+		if (!config->remap_usr2_md) {
+			fprintf(stderr, "Error: No remap_usr2_md found in config file.\n");
+			return 1;
+		}
+	}
+
+	if (config->remap_usr1_md) {
+		if (!bridge_isValid_module_id(config->remap_usr1_md)) {
+			fprintf(stderr, "Error: Invalid remap_usr1_md module id.\n");
+			return 1;
+		}
+		if (config->remap_usr1_md_code ==  -1) {
+			fprintf(stderr, "Error: No remap_usr1_md_code found in config file.\n");
+			return 1;
+		}
+	}
+
+	if (config->remap_usr2_md) {
+		if (!bridge_isValid_module_id(config->remap_usr2_md)) {
+			fprintf(stderr, "Error: Invalid remap_usr2_md module id.\n");
+			return 1;
+		}
+		if (config->remap_usr2_md_code ==  -1) {
+			fprintf(stderr, "Error: No remap_usr2_md_code found in config file.\n");
+			return 1;
+		}
+	}
+
 	if (!config->mqtt_host) {
 		config->mqtt_host = strdup("localhost");
 	}
@@ -204,16 +292,18 @@ void config_cleanup(struct bridge_config *config)
 	free(config->mqtt_host);
 	if(config->serial.port != NULL)
 		free(config->serial.port);
-	if (config->devices_folder != NULL)
-		free(config->devices_folder);
 	if (config->scripts_folder != NULL)
 		free(config->scripts_folder);
 	if (config->interface != NULL)
 		free(config->interface);
-	if (config->remap_usr1 != NULL)
-		free(config->remap_usr1);
-	if (config->remap_usr2 != NULL)
-		free(config->remap_usr2);
+	if (config->remap_usr1_dev != NULL)
+		free(config->remap_usr1_dev);
+	if (config->remap_usr2_dev != NULL)
+		free(config->remap_usr2_dev);
+	if (config->remap_usr1_md != NULL)
+		free(config->remap_usr1_md);
+	if (config->remap_usr2_md != NULL)
+		free(config->remap_usr2_md);
 }
 
 

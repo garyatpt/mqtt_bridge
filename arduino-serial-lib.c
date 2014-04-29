@@ -4,7 +4,7 @@ arduino-serial-lib -- simple library for reading/writing serial ports
 Original work Copyleft (c) 2006-2013, Tod E. Kurt, http://todbot.com/blog/
 https://github.com/todbot/arduino-serial
 
-Modified work Copyleft (c) Marcelo Aquino, https://github.com/mapnull
+Modified work Copyleft (c) 2013 Marcelo Aquino, https://github.com/mapnull
 
 */
 
@@ -177,6 +177,29 @@ int serialport_read_until(int fd, char* buf, char until, int buf_max, int timeou
     } while (b[0] != until && i < buf_max && timeLeft > 0);
 
     return i;
+}
+
+//
+int serialport_send(int fd, const char* str)
+{
+	static struct timeval t1;
+	static int init_t1 = 1; 
+	struct timeval t2;
+	long lastSend;
+
+	if (init_t1) {
+		init_t1 = 0;
+		gettimeofday(&t1, NULL);
+		return serialport_printlf(fd, str);
+	}
+
+	gettimeofday(&t2, NULL);
+	lastSend = (((t2.tv_sec - t1.tv_sec)*1000000) + (t2.tv_usec - t1.tv_usec));		// usec
+	if (lastSend < 50000) {
+		usleep(50000 - lastSend);
+	}
+	gettimeofday(&t1, NULL);
+	return serialport_printlf(fd, str);
 }
 
 //
