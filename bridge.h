@@ -27,34 +27,26 @@
 
 #include <stdbool.h>
 #include "device.h"
-#include "modules.h"
 
-struct bridge {
-	struct device *bridge_dev;
+#define BRIDGE_ALIVE_CNT 360				// 6 minutes
+#define BRIDGE_TOPIC "0"
+
+struct bridge_t {
+	char *uuid;
 	bool serial_ready;
 	int serial_alive;
-	int total_devices;
-	struct device *dev_list;
+	char *serial_uuid;
+	int devices;
+	struct device_t *device_list;
 };
 
-int bridge_init(struct bridge *, char *, char *);
-struct device *bridge_add_device(struct bridge *, char *, char *);
-struct module* bridge_add_module(struct device *, char *, bool);
-struct device *bridge_get_device(struct bridge *, char *);
-struct module *bridge_get_module(struct device *, char *);
-void bridge_set_device_topics(struct device *);
-int bridge_set_md_topic(struct module *, char *);
-int bridge_set_module_specs(struct module *, char *);
-int bridge_remove_device(struct bridge *, char *);
-int bridge_remove_module(struct bridge *, struct device *, char *);
-int bridge_remove_all_modules(struct bridge *, struct device *);
-void bridge_print_device(struct device *);
-void bridge_print_devices(struct bridge *);
-void bridge_print_module(struct module *);
-void bridge_print_modules(struct device *);
-int bridge_isValid_device_id(char *);
-int bridge_isValid_module_id(char *);
-int bridge_isValid_module_topic(char *);
-int bridge_isValid_module_specs(char *);
+int bridge_init(struct bridge_t *, char *);
+struct device_t *bridge_add_device(struct bridge_t *, char *);
+struct device_t *bridge_get_device(struct bridge_t *, char *);
+struct device_t *bridge_get_device_by_id(struct bridge_t *, int);
+int bridge_remove_device(struct bridge_t *, char *);
+void bridge_print_device(struct device_t *);
+void bridge_print_devices(struct bridge_t *);
+int bridge_isValid_uuid(char *);
 
 #endif

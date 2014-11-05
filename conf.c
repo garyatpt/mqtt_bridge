@@ -51,19 +51,17 @@ int config_parse(const char *config_file, struct bridge_config *config)
 	}
 
 	config->debug = 0;
-	config->id = NULL;
+	config->uuid = NULL;
 	config->mqtt_host = NULL;
 	config->mqtt_port = 1883;
 	config->mqtt_qos = 0;
 	config->serial.port = NULL;
 	config->scripts_folder = NULL;
 	config->interface = NULL;
-	config->remap_usr1_dev = NULL;
-	config->remap_usr2_dev = NULL;
-	config->remap_usr1_md = NULL;
-	config->remap_usr2_md = NULL;
-	config->remap_usr1_md_code = -1;
-	config->remap_usr2_md_code = -1;
+	config->usr1_remap_uuid = NULL;
+	config->usr2_remap_uuid = NULL;
+	config->usr1_json = NULL;
+	config->usr2_json = NULL;
 
 	while (fgets(buf, 1024, fptr)) {
 		if (buf[0] != '#' && buf[0] != 10 && buf[0] != 13) {
@@ -81,8 +79,8 @@ int config_parse(const char *config_file, struct bridge_config *config)
 						return 1;
 					}
 				}
-			} else if (!strncmp(buf, "id ", 3)) {
-				if (_conf_parse_string(&(buf[3]), "id", &config->id)) {
+			} else if (!strncmp(buf, "uuid ", 5)) {
+				if (_conf_parse_string(&(buf[5]), "uuid", &config->uuid)) {
 					fclose(fptr);
 					return 1;
 				}
@@ -163,57 +161,35 @@ int config_parse(const char *config_file, struct bridge_config *config)
 					fclose(fptr);
 					return 1;
 				}
-			} else if (!strncmp(buf, "remap_usr1_dev ", 15)) {
-				if (_conf_parse_string(&(buf[15]), "remap_usr1_dev", &config->remap_usr1_dev)) {
+			} else if (!strncmp(buf, "usr1_remap_uuid ", 16)) {
+				if (_conf_parse_string(&(buf[16]), "usr1_remap_uuid", &config->usr1_remap_uuid)) {
 					fclose(fptr);
 					return 1;
 				}
-			} else if (!strncmp(buf, "remap_usr2_dev ", 15)) {
-				if (_conf_parse_string(&(buf[15]), "remap_usr2_dev", &config->remap_usr2_dev)) {
+			} else if (!strncmp(buf, "usr2_remap_uuid ", 16)) {
+				if (_conf_parse_string(&(buf[16]), "usr2_remap_uuid", &config->usr2_remap_uuid)) {
 					fclose(fptr);
 					return 1;
 				}
-			} else if (!strncmp(buf, "remap_usr1_md ", 14)) {
-				if (config->remap_usr1_dev) {
-					if (_conf_parse_string(&(buf[14]), "remap_usr1_md", &config->remap_usr1_md)) {
+			} else if (!strncmp(buf, "usr1_json ", 10)) {
+				if (config->usr1_remap_uuid) {
+					if (_conf_parse_string(&(buf[10]), "usr1_json", &config->usr1_json)) {
 						fclose(fptr);
 						return 1;
 					}
 				} else {
-					fprintf(stderr, "Error: remap_usr1_md keyword without remap_usr1_dev in config.\n");
+					fprintf(stderr, "Error: usr1_json keyword without usr1_remap_uuid in config.\n");
 					fclose(fptr);
 					return 1;
 				}
-			} else if (!strncmp(buf, "remap_usr2_md ", 14)) {
-				if (config->remap_usr2_dev) {
-					if (_conf_parse_string(&(buf[14]), "remap_usr2_md", &config->remap_usr2_md)) {
+			} else if (!strncmp(buf, "usr2_json ", 10)) {
+				if (config->usr2_remap_uuid) {
+					if (_conf_parse_string(&(buf[10]), "usr2_json", &config->usr2_json)) {
 						fclose(fptr);
 						return 1;
 					}
 				} else {
-					fprintf(stderr, "Error: remap_usr2_md keyword without remap_usr2_dev in config.\n");
-					fclose(fptr);
-					return 1;
-				}
-			} else if (!strncmp(buf, "remap_usr1_md_code ", 19)) {
-				if (config->remap_usr1_md) {
-					if (_conf_parse_int(&(buf[19]), "remap_usr1_md_code", &config->remap_usr1_md_code)) {
-						fclose(fptr);
-						return 1;
-					}
-				} else {
-					fprintf(stderr, "Error: remap_usr1_md_code keyword without remap_usr1_md in config.\n");
-					fclose(fptr);
-					return 1;
-				}
-			} else if (!strncmp(buf, "remap_usr2_md_code ", 19)) {
-				if (config->remap_usr2_md) {
-					if (_conf_parse_int(&(buf[19]), "remap_usr2_md_code", &config->remap_usr2_md_code)) {
-						fclose(fptr);
-						return 1;
-					}
-				} else {
-					fprintf(stderr, "Error: remap_usr2_md_code keyword without remap_usr2_md in config.\n");
+					fprintf(stderr, "Error: usr2_json keyword without usr2_remap_uuid in config.\n");
 					fclose(fptr);
 					return 1;
 				}
@@ -224,62 +200,52 @@ int config_parse(const char *config_file, struct bridge_config *config)
 	}
 	fclose(fptr);
 
-	if (!config->id) {
-		fprintf(stderr, "Error: No id found in config file.\n");
+	if (!config->uuid) {
+		fprintf(stderr, "Error: No uuid found in config file.\n");
 		return 1;
 	}
 
-	if (!bridge_isValid_device_id(config->id)) {
-		fprintf(stderr, "Error: Invalid id.\n");
+	if (!bridge_isValid_uuid(config->uuid)) {
+		fprintf(stderr, "Error: Invalid uuid.\n");
 		return 1;
 	}
 
-	if (config->remap_usr1_dev) {
-		if (!bridge_isValid_device_id(config->remap_usr1_dev)) {
-			fprintf(stderr, "Error: Invalid remap_usr1_dev device id.\n");
+	if (config->usr1_remap_uuid) {
+		if (!bridge_isValid_uuid(config->usr1_remap_uuid)) {
+			fprintf(stderr, "Error: Invalid usr1_remap_uuid device uuid.\n");
 			return 1;
 		}
-		if (!config->remap_usr1_md) {
-			fprintf(stderr, "Error: No remap_usr1_md found in config file.\n");
-			return 1;
-		}
-	}
-
-	if (config->remap_usr2_dev) {
-		if (!bridge_isValid_device_id(config->remap_usr2_dev)) {
-			fprintf(stderr, "Error: Invalid remap_usr2_dev device id.\n");
-			return 1;
-		}
-		if (!config->remap_usr2_md) {
-			fprintf(stderr, "Error: No remap_usr2_md found in config file.\n");
+		if (!config->usr1_json) {
+			fprintf(stderr, "Error: No usr1_json found in config file.\n");
 			return 1;
 		}
 	}
 
-	if (config->remap_usr1_md) {
-		if (!bridge_isValid_module_id(config->remap_usr1_md)) {
-			fprintf(stderr, "Error: Invalid remap_usr1_md module id.\n");
+	if (config->usr2_remap_uuid) {
+		if (!bridge_isValid_uuid(config->usr2_remap_uuid)) {
+			fprintf(stderr, "Error: Invalid usr2_remap_uuid device uuid.\n");
 			return 1;
 		}
-		if (config->remap_usr1_md_code ==  -1) {
-			fprintf(stderr, "Error: No remap_usr1_md_code found in config file.\n");
+		if (!config->usr2_json) {
+			fprintf(stderr, "Error: No usr2_json found in config file.\n");
 			return 1;
 		}
 	}
 
-	if (config->remap_usr2_md) {
-		if (!bridge_isValid_module_id(config->remap_usr2_md)) {
-			fprintf(stderr, "Error: Invalid remap_usr2_md module id.\n");
-			return 1;
-		}
-		if (config->remap_usr2_md_code ==  -1) {
-			fprintf(stderr, "Error: No remap_usr2_md_code found in config file.\n");
-			return 1;
-		}
+	if (config->usr1_json) {
+		//TODO: validate json
+	}
+
+	if (config->usr2_json) {
+		//TODO: validate json
 	}
 
 	if (!config->mqtt_host) {
 		config->mqtt_host = strdup("localhost");
+		if (!config->mqtt_host) {
+			fprintf(stderr, "Error: Out of memory.\n");
+			return 1;
+		}
 	}
 
 	return 0;
@@ -288,7 +254,7 @@ int config_parse(const char *config_file, struct bridge_config *config)
 
 void config_cleanup(struct bridge_config *config)
 {
-	free(config->id);
+	free(config->uuid);
 	free(config->mqtt_host);
 	if(config->serial.port != NULL)
 		free(config->serial.port);
@@ -296,16 +262,15 @@ void config_cleanup(struct bridge_config *config)
 		free(config->scripts_folder);
 	if (config->interface != NULL)
 		free(config->interface);
-	if (config->remap_usr1_dev != NULL)
-		free(config->remap_usr1_dev);
-	if (config->remap_usr2_dev != NULL)
-		free(config->remap_usr2_dev);
-	if (config->remap_usr1_md != NULL)
-		free(config->remap_usr1_md);
-	if (config->remap_usr2_md != NULL)
-		free(config->remap_usr2_md);
+	if (config->usr1_remap_uuid != NULL)
+		free(config->usr1_remap_uuid);
+	if (config->usr2_remap_uuid != NULL)
+		free(config->usr2_remap_uuid);
+	if (config->usr1_json != NULL)
+		free(config->usr1_json);
+	if (config->usr2_json != NULL)
+		free(config->usr2_json);
 }
-
 
 static int _conf_parse_int(char *token, const char *name, int *value)
 {

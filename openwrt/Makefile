@@ -4,8 +4,8 @@ include ../config.mk
 
 all : mqtt_bridge
 
-mqtt_bridge : mqtt_bridge.o conf.o arduino-serial-lib.o bridge.o utils.o ../lib/libmosquitto.so.${SOVERSION}
-	${CC} $< -o $@ conf.o arduino-serial-lib.o bridge.o utils.o ${CLIENT_LDFLAGS}
+mqtt_bridge : mqtt_bridge.o conf.o arduino-serial-lib.o bridge.o utils.o cJSON.o ../lib/libmosquitto.so.${SOVERSION}
+	${CC} $< -o $@ conf.o arduino-serial-lib.o bridge.o utils.o cJSON.o ${CLIENT_LDFLAGS} -lm
 
 mqtt_bridge.o : mqtt_bridge.c mqtt_bridge.h ../lib/libmosquitto.so.${SOVERSION}
 	${CC} -c $< -o $@ ${CLIENT_CFLAGS}
@@ -20,6 +20,9 @@ bridge.o : bridge.c bridge.h mqtt_bridge.h utils.h
 	${CC} -c $< -o $@ ${CLIENT_CFLAGS}
 	
 utils.o : utils.c utils.h
+	${CC} -c $< -o $@ ${CLIENT_CFLAGS}
+
+cJSON.o : cJSON.c cJSON.h
 	${CC} -c $< -o $@ ${CLIENT_CFLAGS}
 
 ../lib/libmosquitto.so.${SOVERSION} :

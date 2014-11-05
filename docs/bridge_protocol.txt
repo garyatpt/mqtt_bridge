@@ -1,0 +1,133 @@
+### Protocol ###
+PROTOCOL_ERROR
+PROTOCOL_ALIVE
+PROTOCOL_TIMEOUT
+PROTOCOL_MODULES
+PROTOCOL_MD_ERROR
+PROTOCOL_MD_INFO
+PROTOCOL_MD_ENABLE
+PROTOCOL_MD_DISABLE
+PROTOCOL_MD_TOPIC
+PROTOCOL_MD_OPTIONS
+PROTOCOL_MD_RAW
+
+
+/status
+PROTOCOL_ERROR,error code,module id,module code
+PROTOCOL_ALIVE,modules count,beacon number,beacon interval
+PROTOCOL_TIMEOUT
+PROTOCOL_MD_ENABLE,module id
+PROTOCOL_MD_DISABLE,module id
+PROTOCOL_MD_TOPIC,module id,topic
+
+/config
+device id,
+	PROTOCOL_ERROR,error code,module id,module code
+	PROTOCOL_MODULES,module id 1,module id 2,module id 3,module id 4,module id 5
+	PROTOCOL_MD_INFO,module id,enabled,topic,specification
+	PROTOCOL_MD_ENABLE,module id
+	PROTOCOL_MD_DISABLE,module id
+	PROTOCOL_MD_TOPIC,module id,topic
+	PROTOCOL_MD_OPTIONS,module id,module code,value
+
+/raw
+sensor data
+
+### bridge <- device(debug) ###
+[]
+
+	bridge <- device					@D# debug_msg
+	bridge -> mqtt(bridge_status)		PROTOCOL_MD_OPTIONS, MODULES_BRIDGE_ID, MODULES_BRIDGE_DEBUG, debug_msg
+
+
+### bridge <- device(status) ###
+[PROTOCOL_ERROR, PROTOCOL_ALIVE, PROTOCOL_MD_ENABLE, PROTOCOL_MD_DISABLE, PROTOCOL_MD_TOPIC, PROTOCOL_MD_OPTIONS, PROTOCOL_MD_RAW]
+
+PROTOCOL_ERROR [hardware error]
+	bridge <- device					@S# device_id, PROTOCOL_ERROR, error_code, module_id(op), module_code(op)
+	bridge -> mqtt(device_status)		PROTOCOL_ERROR, error_code, module_id(op), module_code(op)
+
+PROTOCOL_ALIVE [every Xs]
+	bridge <- device					@S# device_id, PROTOCOL_ALIVE, MODULES_CNT, beacon_num, next_beacon_sec
+	bridge -> mqtt(device_status)		PROTOCOL_ALIVE, modules, beacon_num, next_alive
+
+PROTOCOL_MD_ENABLE [reaction]
+	bridge <- device					@S# device_id, PROTOCOL_MD_ENABLE, module_id
+	bridge -> mqtt(device_status)		PROTOCOL_MD_ENABLE, module_id
+
+PROTOCOL_MD_DISABLE [reaction]
+	bridge <- device					@S# device_id, PROTOCOL_MD_DISABLE, module_id
+	bridge -> mqtt(device_status)		PROTOCOL_MD_DISABLE, module_id
+
+PROTOCOL_MD_TOPIC [reaction]
+	bridge <- device					@S# device_id, PROTOCOL_MD_TOPIC, module_id, topic
+	bridge -> mqtt(device_status)		PROTOCOL_MD_TOPIC, module_id, topic
+
+/////
+PROTOCOL_MD_OPTIONS [sensor trigger]
+	bridge <- device					@S# device_id, PROTOCOL_MD_OPTIONS, module_id, module_code, val(op)
+	bridge -> mqtt(device_status)		PROTOCOL_MD_OPTIONS, module_id, module_code, val(op)
+\\\\\
+
+PROTOCOL_MD_RAW [pull or sensor trigger]
+	bridge <- device					@S# device_id, PROTOCOL_MD_RAW, val
+	bridge -> mqtt(md_topic)			val		
+
+
+### bridge <- device(config) ###
+[PROTOCOL_ERROR, PROTOCOL_MD_OPTIONS]
+
+PROTOCOL_ERROR [response]
+	bridge <- device					@C# device_id, req_dev_id, PROTOCOL_ERROR, error_code, module_id(op), module_code(op)
+
+PROTOCOL_MD_OPTIONS
+	bridge <- device					@C# device_id, req_dev_id, PROTOCOL_MD_OPTIONS, module_id, module_code, val(op)
+
+
+### bridge -> device(config) ###
+[PROTOCOL_MODULES, PROTOCOL_MD_INFO]
+
+PROTOCOL_MODULES
+	bridge -> device					@C# device_id, bridge_id, PROTOCOL_MODULES
+	bridge <- device(config)			@C# device_id, req_dev_id, PROTOCOL_MODULES, module1_id, module2_id, ..., moduleX_id
+
+PROTOCOL_MD_INFO
+	bridge -> device					@C# device_id, bridge_id, PROTOCOL_MD_INFO, module_id
+	bridge <- device(config)			@C# device_id, req_dev_id, PROTOCOL_MD_INFO, module_id, enabled, topic, specs(op)
+
+
+### mqtt -> bridge(device_topic) ###
+[PROTOCOL_ERROR, PROTOCOL_MODULES, PROTOCOL_MD_INFO, PROTOCOL_MD_ENABLE, PROTOCOL_MD_DISABLE, PROTOCOL_MD_TOPIC, PROTOCOL_MD_OPTIONS]
+
+PROTOCOL_ERROR
+	mqtt -> bridge						from_dev_id, PROTOCOL_ERROR, error_code, module_id(op), module_code(op)
+
+PROTOCOL_MODULES
+	mqtt -> bridge						from_dev_id, PROTOCOL_MODULES
+	bridge -> mqtt(device_topic)		device_id, PROTOCOL_MODULES, module1_id, module2_id, ..., moduleX_id
+
+PROTOCOL_MD_INFO
+	mqtt -> bridge						from_dev_id , PROTOCOL_MD_INFO, module_id
+	bridge -> mqtt(device_topic)		device_id, PROTOCOL_MD_INFO, module_id, enabled, topic, specs(op)
+
+PROTOCOL_MD_ENABLE
+	mqtt -> bridge						from_dev_id , PROTOCOL_MD_ENABLE, module_id
+	*if module = enable
+	bridge -> mqtt(device_topic)		device_id, PROTOCOL_MD_ENABLE, module_id
+	*else
+	bridge -> device(config)			@C# device_id, req_dev_id, PROTOCOL_MD_ENABLE, module_id
+
+PROTOCOL_MD_DISABLE
+	mqtt -> bridge						from_dev_id , PROTOCOL_MD_DISABLE, module_id
+	*if module = disable
+	bridge -> mqtt(device_topic)		device_id, PROTOCOL_MD_DISABLE, module_id
+	*else
+	bridge -> device(config)			@C# device_id, req_dev_id, PROTOCOL_MD_DISABLE, module_id
+
+PROTOCOL_MD_TOPIC
+	mqtt -> bridge						from_dev_id , PROTOCOL_MD_TOPIC, module_id, topic
+	bridge -> device(config)			@C# device_id, req_dev_id, PROTOCOL_MD_TOPIC, module_id, topic
+
+PROTOCOL_MD_OPTIONS
+	mqtt -> bridge						from_dev_id, PROTOCOL_MD_OPTIONS, module_id, module_code, val(op)
+	bridge -> device(config)			@C# device_id, req_dev_id, PROTOCOL_MD_OPTIONS, module_id, module_code, val(op)

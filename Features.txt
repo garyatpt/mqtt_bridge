@@ -1,0 +1,6 @@
+- Disabling a module from bridge
+- Return a list of scripts available when receive MODULES_SCRIPT_LIST
+- Module options for: bandwidth, serial, bridge
+	- bandwidth: pull
+	- serial: port, baudrate, timeout
+	- bridge: remap_usr*, remap_usr*_md_code 

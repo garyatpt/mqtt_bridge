@@ -25,24 +25,15 @@
 #ifndef ERROR_H
 #define ERROR_H
 
-#define ERROR_INV_DATA 0			// Invalid message format
-#define ERROR_INV_PROTOCOL 1		// Invalid protocol number
-#define ERROR_MIS_PROTOCOL 2		// Missing protocol code
-#define ERROR_MIS_DEVICE_ID 3		// Missing device id
-#define ERROR_MIS_MODULE_ID 4		// Missing module id
-#define ERROR_DEV_POWER_FAILURE 5	// Power failure
-#define ERROR_DEV_HARDWARE 6		// Device hardware error
-#define ERROR_DEV_NOT_READY 7		// Device not ready
-#define ERROR_DEV_INV_ID 8			// Invalid device id
-#define ERROR_MD_NOT_FOUND 9		// Module not found
-#define ERROR_MD_NOT_AVAILABLE 10	// Module not available
-#define ERROR_MD_DISABLED 11		// Module is disabled
-#define ERROR_MD_HARDWARE 12		// Module hardware error
-#define ERROR_MD_INV_ID 13			// Invalid module id
-#define ERROR_MD_INV_INFO 14		// Invalid module info
-#define ERROR_MD_INV_TOPIC 15		// Invalid module topic
-#define ERROR_MD_INV_SPECS 16		// Invalid module specs
-#define ERROR_MD_INV_OPTS 17		// Invalid module options
-#define ERROR_MD_NOT_IPM 18			// Not implemented function
+#define ERROR_OK 0						// No error
+#define ERROR_UNKNOWN 1					// Invalid message format
+#define ERROR_INV_DATA 2				// Invalid message format
+#define ERROR_DEV_POWER_FAILURE 3		// Power failure
+#define ERROR_DEV_HARDWARE 4			// Device hardware error
+#define ERROR_DEV_NOT_READY 5			// Device not ready
+#define ERROR_DEV_INV_UUID 6			// Invalid device uuid
+#define ERROR_NOT_IPM 7					// Not implemented function
+#define ERROR_TIMEOUT 8
+#define ERROR_UNKNOWN_KEY 9
 
 #endif

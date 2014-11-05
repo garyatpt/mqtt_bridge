@@ -26,8 +26,14 @@
 #define SERIAL_H
 
 #define SERIAL_INIT_LEN 3
-#define SERIAL_INIT_DEBUG "@D#"
-#define SERIAL_INIT_STATUS "@S#"
-#define SERIAL_INIT_CONFIG "@C#"
+#define SERIAL_INIT_0 '@'
+#define SERIAL_INIT_2 '#'
+#define SERIAL_INIT_DEBUG 'G'
+#define SERIAL_INIT_UUID 'U'
+#define SERIAL_INIT_SINGLE 'S'
+#define SERIAL_INIT_MULTI 'M'
+#define SERIAL_INIT_CONTROL_STR "@C#"
+#define SERIAL_INIT_DATA_STR "@D#"
+#define SERIAL_INIT_UUID_STR "@U#"
 
 #endif

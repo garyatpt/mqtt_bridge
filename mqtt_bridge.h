@@ -27,6 +27,7 @@
 
 #define MQTT_RETAIN 0
 #define MQTT_MAX_PAYLOAD_LEN 128
+#define UUID_LEN 36
 
 struct bridge_serial{
 	char *port;
@@ -37,19 +38,17 @@ struct bridge_serial{
 
 struct bridge_config{
 	int debug;
-	char *id;
+	char *uuid;
 	char *mqtt_host;
 	int mqtt_port;
 	int mqtt_qos;
 	struct bridge_serial serial;
 	char *scripts_folder;
 	char *interface;
-	char *remap_usr1_dev;
-	char *remap_usr2_dev;
-	char *remap_usr1_md;
-	char *remap_usr2_md;
-	int remap_usr1_md_code;
-	int remap_usr2_md_code;
+	char *usr1_remap_uuid;
+	char *usr2_remap_uuid;
+	char *usr1_json;
+	char *usr2_json;
 };
 
 int config_parse(const char *conffile, struct bridge_config *config);

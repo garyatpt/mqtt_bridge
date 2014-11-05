@@ -29,6 +29,7 @@
 
 int utils_htoi(char);
 int utils_getInt(char **, int *);
+int utils_getInt_dlm(char **, int *, char);
 int utils_getString(char **, char *, int, char);
 int utils_run_script(char *, char *, char *, int, int);
 

@@ -43,6 +43,11 @@ int utils_htoi(char c)
 
 int utils_getInt(char **buf, int *number)
 {
+	return utils_getInt_dlm(buf, number, GETINT_DLM);
+}
+
+int utils_getInt_dlm(char **buf, int *number, char dlm)
+{
 	bool isInt = false;
 	char ch;
 	char *pt;
@@ -55,14 +60,14 @@ int utils_getInt(char **buf, int *number)
 	buf_len = strlen(pt);
 	if (buf_len == 0) return 0;
 
-	if ((char)pt[0] == GETINT_DLM)
+	if ((char)pt[0] == dlm)
 		i = 1;
 	for (; i < buf_len; i++) {
 		ch = (char)pt[i];
 		if (ch >= '0' && ch <= '9') {
 			*number = (*number * 10) + (ch - '0');
 			isInt = true;
-		} else if (ch == GETINT_DLM) {
+		} else if (ch == dlm) {
 			i++;
 			break;
 		} else {

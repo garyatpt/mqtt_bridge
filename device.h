@@ -25,28 +25,11 @@
 #ifndef DEVICE_H
 #define DEVICE_H
 
-#define DEVICE_ID_SIZE 8
-
-#define DEVICE_ALIVE_MAX 360				// 6 minutes
-#define DEVICE_TOPIC_CONFIG "config/"
-#define DEVICE_TOPIC_CONFIG_LEN 7
-#define DEVICE_TOPIC_STATUS "status/"
-#define DEVICE_TOPIC_STATUS_LEN 7
-#define DEVICE_TOPIC_MIN_SIZE 3
-#define DEVICE_TOPIC_MAX_SIZE 50
-#define DEVICE_SPECS_MIN_SIZE 3
-#define DEVICE_SPECS_MAX_SIZE 10
-
-struct device {
-	char *id;
+struct device_t {
+	char *uuid;
+	int id;
 	int alive;
-	int modules;
-	struct module *md_deps;
-	struct module *md_list;
-	char *status_topic;
-	char *config_topic;
-	int md_topic_sub;
-	struct device *next;
+	struct device_t *next;
 };
 
 #endif
