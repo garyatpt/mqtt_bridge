@@ -62,6 +62,7 @@ struct device_t* bridge_add_device(struct bridge_t *bridge, char *uuid) {
 	}
 
 	device->id = 0;
+	device->server_id = 0;
 	device->alive = BRIDGE_ALIVE_CNT;
 	device->next = bridge->device_list;
 	bridge->device_list = device;

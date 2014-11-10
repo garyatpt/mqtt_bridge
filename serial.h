@@ -28,12 +28,19 @@
 #define SERIAL_INIT_LEN 3
 #define SERIAL_INIT_0 '@'
 #define SERIAL_INIT_2 '#'
-#define SERIAL_INIT_DEBUG 'G'
-#define SERIAL_INIT_UUID 'U'
-#define SERIAL_INIT_SINGLE 'S'
-#define SERIAL_INIT_MULTI 'M'
-#define SERIAL_INIT_CONTROL_STR "@C#"
-#define SERIAL_INIT_DATA_STR "@D#"
-#define SERIAL_INIT_UUID_STR "@U#"
+
+#define SERIAL_DEBUG_STR "@G#"
+#define SERIAL_UUID_STR "@U#"
+#define SERIAL_SINGLE_COMMA_STR "@C#"		// Single device, comma format
+#define SERIAL_SINGLE_JSON_STR "@J#"		// Single device, json format
+#define SERIAL_MULTI_COMMA_STR "@c#"		// Multi devices, comma format
+#define SERIAL_MULTI_JSON_STR "@j#"			// Multi devices, json format
+
+#define SERIAL_DEBUG_C 'G'
+#define SERIAL_UUID_C 'U'
+#define SERIAL_SINGLE_COMMA_C 'C'				
+#define SERIAL_SINGLE_JSON_C 'J'
+#define SERIAL_MULTI_COMMA_C 'c'
+#define SERIAL_MULTI_JSON_C 'j'
 
 #endif

@@ -49,7 +49,7 @@
 #define MAX_OUTPUT 256
 #define GBUF_SIZE 100
 
-const char version[] = "0.3.1";
+const char version[] = "0.3.2";
 
 struct bridge_t bridge;
 
@@ -141,7 +141,7 @@ void send_alive(struct mosquitto *mosq) {
 	static unsigned int beacon_num = 1;
 
 	snprintf(gbuf, GBUF_SIZE, "{\"beacon\":[%d,30]}", beacon_num);
-	if (mqtt_publish(mosq, BRIDGE_TOPIC, gbuf))
+	if (mqtt_publish(mosq, MAIN_TOPIC, gbuf))
 		beacon_num++;
 }
 
@@ -162,6 +162,7 @@ void on_mqtt_connect(struct mosquitto *mosq, void *obj, int result)
 		}
 
 		for (device = bridge.device_list; device != NULL; device = device->next) {
+			device->server_id = 0;
 			rc = mosquitto_subscribe(mosq, NULL, device->uuid, config.mqtt_qos);
 			if (rc) {
 				fprintf(stderr, "MQTT - Subscribe ERROR: %s\n", mosquitto_strerror(rc));
@@ -183,12 +184,80 @@ void on_mqtt_disconnect(struct mosquitto *mosq, void *obj, int rc)
 	if (config.debug != 0) printf("MQTT Disconnected: %s\n", mosquitto_strerror(rc));
 }
 
-void mqtt_to_bridge(struct mosquitto *mosq, char *payload)
+void mqtt_to_bridge(struct mosquitto *mosq, cJSON *json, int tid)
 {
-	cJSON *json, *item;
-	char *value, *ptr;
-	int tid, rc;
+	char *value;
+	int rc, id;
 	char script_output[20];
+	cJSON *json_item;
+	struct device_t *device;
+
+	if ((json_item = cJSON_GetObjectItem(json, "set")) && (value = json_item->valuestring)) {
+		// Set operation
+		if (config.debug > 2) printf("MQTT - bridge options: set\n");
+		
+		if (!strcmp(value, "id")) {
+			if (!(json_item = cJSON_GetObjectItem(json, "id")) || (json_item->type != cJSON_Number)) {
+				if (config.debug > 1) printf("Invalid or missing id.\n");
+				return;
+			}
+			id = json_item->valueint;
+			if (!(json_item = cJSON_GetObjectItem(json, "uuid")) || !(value = json_item->valuestring)) {
+				if (config.debug > 1) printf("Invalid or missing uuid.\n");
+				return;
+			}
+			device = bridge_get_device(&bridge, value);
+			if (device) {
+				device->server_id = id;		// With the id set, we don't need to send the entire uuid
+											// to distinguished the relay device 
+				if (config.debug > 2) printf("Device server id updated.\n");
+			}
+		}
+	} else if ((json_item = cJSON_GetObjectItem(json, "run")) && (value = json_item->valuestring)) {
+		// Run operation
+		if (config.debug > 2) printf("MQTT - bridge options: run\n");
+
+		if (config.scripts_folder) {
+			rc = utils_run_script(config.scripts_folder, value, script_output, 20, config.debug);
+			if (rc == -1) {
+				// No memory left
+				run = 0;
+			} else if (rc == 1) {
+				snprintf(gbuf, GBUF_SIZE, "{\"tid:\":%d,\"error\":%d}", tid, ERROR_UNKNOWN);
+				mqtt_publish(mosq, MAIN_TOPIC, gbuf );        
+			} else if (rc == 0) {
+				if (strlen(gbuf) > 0) {
+					if (config.debug > 1) printf("Script output:\n-\n%s\n-\n", script_output);
+					snprintf(gbuf, GBUF_SIZE, "{\"tid\":%d,\"run\":\"%s\"}", tid, script_output);
+					mqtt_publish(mosq, MAIN_TOPIC, gbuf);
+				} else {
+					snprintf(gbuf, GBUF_SIZE, "{\"tid\":%d}", tid);
+					mqtt_publish(mosq, MAIN_TOPIC, gbuf);
+				}
+			}
+		}
+	} else {
+		if (config.debug > 1) printf("MQTT - Unknown bridge option.\n");
+		snprintf(gbuf, GBUF_SIZE, "{\"tid:\":%d,\"error\":%d}", tid, ERROR_UNKNOWN_JSON);
+		mqtt_publish(mosq, MAIN_TOPIC, gbuf );
+		return;
+	}
+}
+
+void on_mqtt_message(struct mosquitto *mosq, void *obj, const struct mosquitto_message *msg)
+{
+	char *payload, *topic;
+	int *sd;
+	struct device_t *device;
+	cJSON *json, *json_item;
+	char *value;
+	int tid;
+
+	sd = (int *)obj;
+	payload  = (char *)msg->payload;
+	topic = msg->topic;
+
+	if (config.debug > 2) printf("MQTT IN - topic: %s - payload: %s\n", msg->topic, payload);
 
 	json = cJSON_Parse(payload);
 	if (!json) {
@@ -197,99 +266,38 @@ void mqtt_to_bridge(struct mosquitto *mosq, char *payload)
 		return;
 	}
 
-	item = cJSON_GetObjectItem(json, "tid");
-	if (!item) {
-		if (config.debug > 1) printf("MQTT: Missing tid.");
+	if (!(json_item = cJSON_GetObjectItem(json, "tid")) || (json_item->type != cJSON_Number)) {
+		if (config.debug > 1) printf("MQTT: Invalid or missing tid.\n");
 		cJSON_Delete(json);
 		return;
 	}
-	value = cJSON_Print(item);
-	ptr = value;
-	if (!utils_getInt_dlm(&ptr, &tid, '\0')) {
-		if (config.debug > 1) printf("MQTT: Invalid tid.");
-		cJSON_Delete(json);
-		free(value);
-		return;
-	}
-	free(value);
-
-	item = cJSON_GetObjectItem(json, "bridge");
-	if (item) {
-		// Bridge key
-		value = cJSON_Print(item);
-		if (config.debug > 1) printf("MQTT - json: bridge.\n");
-	} else {
-		item = cJSON_GetObjectItem(json, "serial");
-		if (item) {
-			// Serial key
-			value = cJSON_Print(item);
-			if (config.debug > 1) printf("MQTT - json: serial.\n");
-		} else {
-			item = cJSON_GetObjectItem(json, "script");
-			if (item) {
-				// Script key
-				value = cJSON_Print(item);
-				if (config.debug > 1) printf("MQTT - json: script.\n");
-				if (config.scripts_folder) {
-					rc = utils_run_script(config.scripts_folder, value, script_output, 20, config.debug);
-					if (rc == -1) {
-						// No memory left
-						run = 0;
-					} else if (rc == 1) {
-						snprintf(gbuf, GBUF_SIZE, "{\"tid:\":%d,\"error\":%d}", tid, ERROR_UNKNOWN);
-						mqtt_publish(mosq, BRIDGE_TOPIC, gbuf );        
-					} else if (rc == 0) {
-						if (strlen(gbuf) > 0) {
-							if (config.debug > 1) printf("Script output:\n-\n%s\n-\n", script_output);
-							snprintf(gbuf, GBUF_SIZE, "{\"tid\":%d,\"script\":\"%s\"}", tid, script_output);
-							mqtt_publish(mosq, BRIDGE_TOPIC, gbuf);
-						} else {
-							snprintf(gbuf, GBUF_SIZE, "{\"tid\":%d}", tid);
-							mqtt_publish(mosq, BRIDGE_TOPIC, gbuf);
-						}
-					}
-				}
-			} else {
-				if (config.debug > 1) printf("MQTT - Unknown json key.\n");
-				snprintf(gbuf, GBUF_SIZE, "{\"tid:\":%d,\"error\":%d}", tid, ERROR_UNKNOWN_KEY);
-				mqtt_publish(mosq, BRIDGE_TOPIC, gbuf );
-				cJSON_Delete(json);
-				return;
-			}
-		}
-	}
-	free(value);
-	cJSON_Delete(json);
-}
-
-void on_mqtt_message(struct mosquitto *mosq, void *obj, const struct mosquitto_message *msg)
-{
-	char *payload, *topic;
-	int *sd;
-	struct device_t *device;
-
-	sd = (int *)obj;
-	payload  = (char *)msg->payload;
-	topic = msg->topic;
-
-	if (config.debug > 2) printf("MQTT IN - topic: %s - payload: %s\n", msg->topic, payload);
+	tid = json_item->valueint;
 
 	if (!strcmp(topic, bridge.uuid)) {
 		if (config.debug > 1) printf("Message for the bridge: %s\n", payload);
-		mqtt_to_bridge(mosq, payload);
+		mqtt_to_bridge(mosq, json, tid);
 	} else {
 		device = bridge_get_device(&bridge, topic);
 		if (!device) {
 			fprintf(stderr, "MQTT - Error: Failed to get device: %s\n", topic);
-			return;
-		}
-		if (device->id == 0) {
-			snprintf(gbuf, GBUF_SIZE, "%s%s", SERIAL_INIT_DATA_STR, payload);
 		} else {
-			snprintf(gbuf, GBUF_SIZE, "%s%d%s", SERIAL_INIT_DATA_STR, device->id, payload);
+			if ((json_item = cJSON_GetObjectItem(json, "comma")) && (value = json_item->valuestring)) {
+				if (device->id == 0) {
+					snprintf(gbuf, GBUF_SIZE, "%s%s", SERIAL_SINGLE_COMMA_STR, value);
+				} else {
+					snprintf(gbuf, GBUF_SIZE, "%s%d%s", SERIAL_MULTI_COMMA_STR, device->id, value);
+				}
+			} else {
+				if (device->id == 0) {
+					snprintf(gbuf, GBUF_SIZE, "%s%s", SERIAL_SINGLE_JSON_STR, payload);
+				} else {
+					snprintf(gbuf, GBUF_SIZE, "%s%d%s", SERIAL_SINGLE_JSON_STR, device->id, payload);
+				}
+			}
+			serialport_send(*sd, gbuf);
 		}
-		serialport_send(*sd, gbuf);
 	}
+	cJSON_Delete(json);
 }
 
 int serial_in(int sd, struct mosquitto *mosq)
@@ -338,10 +346,10 @@ int serial_in(int sd, struct mosquitto *mosq)
 		serial_buf_ptr = serial_buf + SERIAL_INIT_LEN;
 
 		switch (serial_buf[1]) {
-			case SERIAL_INIT_DEBUG:
+			case SERIAL_DEBUG_C:
 				if (config.debug) printf("Serial - Debug: %s\n", serial_buf_ptr);
 				break;
-			case SERIAL_INIT_UUID:
+			case SERIAL_UUID_C:
 				if (!bridge_isValid_uuid(serial_buf_ptr)) {
 					if (config.debug > 1) printf("Serial - Invalid uuid.\n");
 					return 0;
@@ -349,13 +357,15 @@ int serial_in(int sd, struct mosquitto *mosq)
 				device = bridge_get_device(&bridge, serial_buf_ptr);
 				if (!device) {
 					device = bridge_add_device(&bridge, serial_buf_ptr);
-					rc = mosquitto_subscribe(mosq, NULL, device->uuid, config.mqtt_qos);
-					if (rc) {
-						fprintf(stderr, "MQTT - Subscribe ERROR: %s\n", mosquitto_strerror(rc));
-						run = 0;
-						break;
+					if (connected) {
+						rc = mosquitto_subscribe(mosq, NULL, device->uuid, config.mqtt_qos);
+						if (rc) {
+							fprintf(stderr, "MQTT - Subscribe ERROR: %s\n", mosquitto_strerror(rc));
+							run = 0;
+							break;
+						}
+						if (config.debug > 1) printf("Subscribed to uuid: %s\n", device->uuid);
 					}
-					if (config.debug > 1) printf("Subscribed to uuid: %s\n", device->uuid);
 				}
 				if (!bridge.serial_uuid) {
 					bridge.serial_uuid = strdup(device->uuid);
@@ -366,31 +376,41 @@ int serial_in(int sd, struct mosquitto *mosq)
 					if (config.debug > 1) printf("Bridge serial_uuid: %s\n", device->uuid);
 				}
 				break;
-			case SERIAL_INIT_SINGLE:
+			case SERIAL_SINGLE_JSON_C:
 				if (!bridge.serial_uuid) {
-					serialport_send(sd, SERIAL_INIT_UUID_STR);
+					serialport_send(sd, SERIAL_UUID_STR);
 					if (config.debug > 2) printf("Serial - Sent get uuid.\n");
 					break;
 				}
 				device = bridge_get_device(&bridge, bridge.serial_uuid);
 				device->alive = BRIDGE_ALIVE_CNT;		// Reset alive count
-				snprintf(gbuf, GBUF_SIZE, "bridge/%s", bridge.serial_uuid);
+				if (device->server_id != 0)
+					snprintf(gbuf, GBUF_SIZE, "%d", device->server_id);
+				else
+					snprintf(gbuf, GBUF_SIZE, "b/%s", bridge.serial_uuid);
 				mqtt_publish(mosq, gbuf, serial_buf_ptr);
 				break;
-			case SERIAL_INIT_MULTI:
+			case SERIAL_MULTI_JSON_C:
 				if (!utils_getInt_dlm(&serial_buf_ptr, &id, '{')) {
 					if (config.debug > 1) printf("Serial - Invalid id.\n");
 					return 0;
 				}
 				device = bridge_get_device_by_id(&bridge, id);
 				if (!device) {
-					snprintf(gbuf, GBUF_SIZE, "%s%d", SERIAL_INIT_UUID_STR, id);
+					snprintf(gbuf, GBUF_SIZE, "%s%d", SERIAL_UUID_STR, id);
 					serialport_send(sd, gbuf);
 					break;
 				}
 				device->alive = BRIDGE_ALIVE_CNT;		// Reset alive count
-				snprintf(gbuf, GBUF_SIZE, "bridge/%s", device->uuid);
+				if (device->server_id != 0)
+					snprintf(gbuf, GBUF_SIZE, "%d", device->server_id);
+				else
+					snprintf(gbuf, GBUF_SIZE, "b/%s", device->uuid);
 				mqtt_publish(mosq, gbuf, serial_buf_ptr);
+				break;
+			case SERIAL_SINGLE_COMMA_C:
+			case SERIAL_MULTI_COMMA_C:
+				//TODO
 				break;
 			default:
 				if (config.debug > 1) printf("Unknown serial data.\n");
@@ -414,14 +434,14 @@ void signal_usr(int sd, struct mosquitto *mosq)
 			device = bridge_get_device(&bridge, config.usr1_remap_uuid);
 			if (device) {
 				if (device->id == 0)
-					snprintf(gbuf, GBUF_SIZE, "%s%s", SERIAL_INIT_DATA_STR, config.usr1_json);
+					snprintf(gbuf, GBUF_SIZE, "%s%s", SERIAL_SINGLE_JSON_STR, config.usr1_json);
 				else
-					snprintf(gbuf, GBUF_SIZE, "%s%d%s", SERIAL_INIT_DATA_STR, device->id, config.usr1_json);
+					snprintf(gbuf, GBUF_SIZE, "%s%d%s", SERIAL_MULTI_JSON_STR, device->id, config.usr1_json);
 				serialport_send(sd, gbuf);
 			}
 		} else if (connected) {
 			snprintf(gbuf, GBUF_SIZE, "{\"push\":\"signal\",\"signal\":\"usr1\"}");
-			mqtt_publish(mosq, BRIDGE_TOPIC, gbuf);
+			mqtt_publish(mosq, MAIN_TOPIC, gbuf);
 		}
 	}
 
@@ -430,14 +450,14 @@ void signal_usr(int sd, struct mosquitto *mosq)
 			device = bridge_get_device(&bridge, config.usr2_remap_uuid);
 			if (device) {
 				if (device->id == 0)
-					snprintf(gbuf, GBUF_SIZE, "%s%s", SERIAL_INIT_DATA_STR, config.usr1_json);
+					snprintf(gbuf, GBUF_SIZE, "%s%s", SERIAL_SINGLE_JSON_STR, config.usr1_json);
 				else
-					snprintf(gbuf, GBUF_SIZE, "%s%d%s", SERIAL_INIT_DATA_STR, device->id, config.usr1_json);
+					snprintf(gbuf, GBUF_SIZE, "%s%d%s", SERIAL_MULTI_JSON_STR, device->id, config.usr1_json);
 				serialport_send(sd, gbuf);
 			}
 		} else if (connected) {
 			snprintf(gbuf, GBUF_SIZE, "{\"push\":\"signal\",\"signal\":\"usr2\"}");
-			mqtt_publish(mosq, BRIDGE_TOPIC, gbuf);
+			mqtt_publish(mosq, MAIN_TOPIC, gbuf);
 		}
 	}
 
@@ -450,7 +470,7 @@ void serial_hang(struct mosquitto *mosq)
 	bridge.serial_alive = 0;
 
 	if (connected) {
-		mqtt_publish(mosq, BRIDGE_TOPIC, "{\"error\":\"serial\"}");
+		mqtt_publish(mosq, MAIN_TOPIC, "{\"error\":\"serial\"}");
 	}
 }
 
@@ -529,7 +549,6 @@ int main(int argc, char *argv[])
 		}
 		return 1;
 	}
-	mosquitto_will_set(mosq, config.uuid, strlen(gbuf), "{\"timeout\":1}", config.mqtt_qos, MQTT_RETAIN);
 
 	mosquitto_connect_callback_set(mosq, on_mqtt_connect);
 	mosquitto_disconnect_callback_set(mosq, on_mqtt_disconnect);
@@ -566,6 +585,7 @@ int main(int argc, char *argv[])
 
 	rc = mosquitto_connect(mosq, config.mqtt_host, config.mqtt_port, 60);
 	if (rc) {
+		//TODO: ERROR: Error defined by errno.
 		fprintf(stderr, "ERROR: %s\n", mosquitto_strerror(rc));
 		return -1;
 	}
@@ -590,10 +610,10 @@ int main(int argc, char *argv[])
 		rc = mosquitto_loop(mosq, 100, 1);
 		if (run && rc) {
 			if (config.debug > 2) printf("MQTT loop: %s\n", mosquitto_strerror(rc));
-			usleep(100000);	// wait 100 msec
+			usleep(1000000);	// wait 100 msec
 			mosquitto_reconnect(mosq);
 		}
-		usleep(20);
+		//usleep(20);
 		
 		if (seconds != last_second) {
 			last_second = seconds;
@@ -611,7 +631,7 @@ int main(int argc, char *argv[])
 
 					if (bandwidth) {
 						snprintf(gbuf, GBUF_SIZE, "{\"push\":\"bandwidth\",\"up\":%.0f,\"down\":%.0f}", upspeed, downspeed);
-						mqtt_publish(mosq, BRIDGE_TOPIC, gbuf);
+						mqtt_publish(mosq, MAIN_TOPIC, gbuf);
 						if (config.debug > 2) printf("down: %f - up: %f\n", downspeed, upspeed);
 					}
 				} else {
@@ -622,7 +642,10 @@ int main(int argc, char *argv[])
 					device->alive -= 30;
 					if (device->alive < 0) {
 						if (connected) {
-							snprintf(gbuf, GBUF_SIZE, "/bridge/%s", device->uuid);
+							if (device->server_id != 0)
+								snprintf(gbuf, GBUF_SIZE, "%d", device->server_id);
+							else
+								snprintf(gbuf, GBUF_SIZE, "b/%s", bridge.serial_uuid);
 							mqtt_publish(mosq, gbuf, "{\"timeout\":1}");
 						}
 						if (config.debug) printf("Device: %s - Timeout.\n", device->uuid);
@@ -641,7 +664,7 @@ int main(int argc, char *argv[])
 							serialport_flush(sd);
 							bridge.serial_ready = true;
 							if (connected)
-								mqtt_publish(mosq, BRIDGE_TOPIC, "{\"trig\":\"serial\",\"serial\":\"open\"}");
+								mqtt_publish(mosq, MAIN_TOPIC, "{\"trig\":\"serial\",\"serial\":\"open\"}");
 							if (config.debug) printf("Serial reopened.\n");
 						}
 					}

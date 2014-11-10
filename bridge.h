@@ -29,7 +29,7 @@
 #include "device.h"
 
 #define BRIDGE_ALIVE_CNT 360				// 6 minutes
-#define BRIDGE_TOPIC "0"
+#define MAIN_TOPIC "0"
 
 struct bridge_t {
 	char *uuid;

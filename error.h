@@ -25,15 +25,20 @@
 #ifndef ERROR_H
 #define ERROR_H
 
-#define ERROR_OK 0						// No error
-#define ERROR_UNKNOWN 1					// Invalid message format
-#define ERROR_INV_DATA 2				// Invalid message format
-#define ERROR_DEV_POWER_FAILURE 3		// Power failure
-#define ERROR_DEV_HARDWARE 4			// Device hardware error
-#define ERROR_DEV_NOT_READY 5			// Device not ready
-#define ERROR_DEV_INV_UUID 6			// Invalid device uuid
-#define ERROR_NOT_IPM 7					// Not implemented function
-#define ERROR_TIMEOUT 8
-#define ERROR_UNKNOWN_KEY 9
+typedef enum {
+	ERROR_OK = 0,
+	ERROR_UNKNOWN,
+	ERROR_INV_DATA,				// Invalid message format
+	ERROR_INV_JSON,				// Invalid json
+	ERROR_UNKNOWN_JSON,			// Unknown json
+	ERROR_UNKNOWN_JSON_KEY,		// Unknown json key
+	ERROR_INV_VALUE,			// Invalid value
+	ERROR_MIS_UUID,				// Missing uuid
+	ERROR_POWER_FAILURE,		// Power failure
+	ERROR_HARDWARE,				// Hardware error
+	ERROR_NOT_READY,			// Not ready
+	ERROR_NOT_IPM,				// Not implemented function
+	ERROR_TIMEOUT
+} error_t;
 
 #endif

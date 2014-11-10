@@ -28,6 +28,7 @@
 struct device_t {
 	char *uuid;
 	int id;
+	int server_id;
 	int alive;
 	struct device_t *next;
 };
